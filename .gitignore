@@ -72,3 +72,5 @@ tests/
 # Docker history
 .uw-lab-docker-history
 env_uwlab
+pyrightconfig.json
+expert_policies
