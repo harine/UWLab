@@ -107,66 +107,66 @@ class ResetStatesSceneCfg(InteractiveSceneCfg):
 class ResetStatesBaseEventCfg:
     """Configuration for randomization."""
 
-    # startup: low friction to avoid slip
-    reset_robot_material = EventTerm(
-        func=task_mdp.randomize_rigid_body_material,  # type: ignore
-        mode="startup",
-        params={
-            "static_friction_range": (0.3, 0.3),
-            "dynamic_friction_range": (0.2, 0.2),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 1,
-            "asset_cfg": SceneEntityCfg("robot"),
-            "make_consistent": True,
-        },
-    )
+    # # startup: low friction to avoid slip
+    # reset_robot_material = EventTerm(
+    #     func=task_mdp.randomize_rigid_body_material,  # type: ignore
+    #     mode="startup",
+    #     params={
+    #         "static_friction_range": (0.3, 0.3),
+    #         "dynamic_friction_range": (0.2, 0.2),
+    #         "restitution_range": (0.0, 0.0),
+    #         "num_buckets": 1,
+    #         "asset_cfg": SceneEntityCfg("robot"),
+    #         "make_consistent": True,
+    #     },
+    # )
 
-    insertive_object_material = EventTerm(
-        func=task_mdp.randomize_rigid_body_material,  # type: ignore
-        mode="startup",
-        params={
-            "static_friction_range": (0.3, 0.3),
-            "dynamic_friction_range": (0.2, 0.2),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 1,
-            "asset_cfg": SceneEntityCfg("insertive_object"),
-            "make_consistent": True,
-        },
-    )
+    # insertive_object_material = EventTerm(
+    #     func=task_mdp.randomize_rigid_body_material,  # type: ignore
+    #     mode="startup",
+    #     params={
+    #         "static_friction_range": (0.3, 0.3),
+    #         "dynamic_friction_range": (0.2, 0.2),
+    #         "restitution_range": (0.0, 0.0),
+    #         "num_buckets": 1,
+    #         "asset_cfg": SceneEntityCfg("insertive_object"),
+    #         "make_consistent": True,
+    #     },
+    # )
 
-    receptive_object_material = EventTerm(
-        func=task_mdp.randomize_rigid_body_material,  # type: ignore
-        mode="startup",
-        params={
-            "static_friction_range": (0.3, 0.3),
-            "dynamic_friction_range": (0.2, 0.2),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 1,
-            "asset_cfg": SceneEntityCfg("receptive_object"),
-            "make_consistent": True,
-        },
-    )
+    # receptive_object_material = EventTerm(
+    #     func=task_mdp.randomize_rigid_body_material,  # type: ignore
+    #     mode="startup",
+    #     params={
+    #         "static_friction_range": (0.3, 0.3),
+    #         "dynamic_friction_range": (0.2, 0.2),
+    #         "restitution_range": (0.0, 0.0),
+    #         "num_buckets": 1,
+    #         "asset_cfg": SceneEntityCfg("receptive_object"),
+    #         "make_consistent": True,
+    #     },
+    # )
 
     # reset
 
-    reset_everything = EventTerm(func=task_mdp.reset_scene_to_default, mode="reset", params={})
+    # reset_everything = EventTerm(func=task_mdp.reset_scene_to_default, mode="reset", params={})
 
-    reset_robot_pose = EventTerm(
-        func=task_mdp.reset_root_states_uniform,
-        mode="reset",
-        params={
-            "pose_range": {
-                "x": (-0.01, 0.01),
-                "y": (-0.059, -0.019),
-                "z": (-0.01, 0.01),
-                "roll": (0.0, 0.0),
-                "pitch": (0.0, 0.0),
-                "yaw": (0.0, 0.0),
-            },
-            "velocity_range": {},
-            "asset_cfgs": {"robot": SceneEntityCfg("robot"), "ur5_metal_support": SceneEntityCfg("ur5_metal_support")},
-        },
-    )
+    # reset_robot_pose = EventTerm(
+    #     func=task_mdp.reset_root_states_uniform,
+    #     mode="reset",
+    #     params={
+    #         "pose_range": {
+    #             "x": (-0.01, 0.01),
+    #             "y": (-0.059, -0.019),
+    #             "z": (-0.01, 0.01),
+    #             "roll": (0.0, 0.0),
+    #             "pitch": (0.0, 0.0),
+    #             "yaw": (0.0, 0.0),
+    #         },
+    #         "velocity_range": {},
+    #         "asset_cfgs": {"robot": SceneEntityCfg("robot"), "ur5_metal_support": SceneEntityCfg("ur5_metal_support")},
+    #     },
+    # )
 
     reset_receptive_object_pose = EventTerm(
         func=task_mdp.reset_root_states_uniform,
