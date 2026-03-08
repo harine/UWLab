@@ -521,7 +521,7 @@ class UR5eRobotiq2f85ResetStatesCfg(ManagerBasedRLEnvCfg):
     observations: ResetStatesObservationsCfg = ResetStatesObservationsCfg()
     actions: Ur5eRobotiq2f85RelativeOSCAction = Ur5eRobotiq2f85RelativeOSCAction()
     rewards: ResetStatesRewardsCfg = ResetStatesRewardsCfg()
-    viewer: ViewerCfg = ViewerCfg(eye=(2.0, 0.0, 0.75), origin_type="world", env_index=0, asset_name="robot")
+    viewer: ViewerCfg = ViewerCfg(eye=(0.0, 0.0, 0.75), origin_type="env", env_index=0, asset_name="robot")
     variants = variants
 
     def __post_init__(self):

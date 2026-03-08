@@ -454,9 +454,46 @@ class ObservationsCfg:
             self.concatenate_terms = True
             self.history_length = 1
 
+    @configclass
+    class PositionsCfg(ObsGroup):
+        """Positions observations for policy group."""
+        end_effector_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame_with_metadata,
+            params={
+                "target_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+                "target_asset_offset_metadata_key": "gripper_offset",
+                "root_asset_offset_metadata_key": "offset",
+                "rotation_repr": "axis_angle",
+            },
+        )
+        insertive_asset_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame_with_metadata,
+            params={
+                "target_asset_cfg": SceneEntityCfg("insertive_object"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+                "root_asset_offset_metadata_key": "offset",
+                "rotation_repr": "axis_angle",
+            },
+        )
+        receptive_asset_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame_with_metadata,
+            params={
+                "target_asset_cfg": SceneEntityCfg("receptive_object"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+                "root_asset_offset_metadata_key": "offset",
+                "rotation_repr": "axis_angle",
+            },
+        )
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+            self.history_length = 1
+
     # observation groups
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
+    positions: PositionsCfg = PositionsCfg()
 
 
 @configclass
@@ -477,7 +514,7 @@ class RewardsCfg:
     abnormal_robot = RewTerm(func=task_mdp.abnormal_robot_state, weight=-100.0)
 
     # task rewards
-
+    # all 0.1s
     progress_context = RewTerm(
         func=task_mdp.ProgressContext,  # type: ignore
         weight=0.1,
@@ -489,7 +526,7 @@ class RewardsCfg:
 
     ee_asset_distance = RewTerm(
         func=task_mdp.ee_asset_distance_tanh,
-        weight=0.1,
+        weight=0.0,
         params={
             "root_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
             "target_asset_cfg": SceneEntityCfg("insertive_object"),
@@ -498,7 +535,7 @@ class RewardsCfg:
         },
     )
 
-    dense_success_reward = RewTerm(func=task_mdp.dense_success_reward, weight=0.1, params={"std": 1.0})
+    dense_success_reward = RewTerm(func=task_mdp.dense_success_reward, weight=0.0, params={"std": 1.0})
 
     success_reward = RewTerm(func=task_mdp.success_reward, weight=1.0)
 
@@ -583,7 +620,7 @@ class Ur5eRobotiq2f85RlStateCfg(ManagerBasedRLEnvCfg):
     terminations: TerminationsCfg = TerminationsCfg()
     events: BaseEventCfg = MISSING
     commands: CommandsCfg = CommandsCfg()
-    viewer: ViewerCfg = ViewerCfg(eye=(2.0, 0.0, 0.75), origin_type="world", env_index=0, asset_name="robot")
+    viewer: ViewerCfg = ViewerCfg(eye=(0.0, 0.0, 0.75), origin_type="env", env_index=0, asset_name="robot")
     variants = variants
 
     def __post_init__(self):

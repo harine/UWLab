@@ -1,0 +1,19 @@
+data_path: "data/peg_expert/trajectories/q_data_chunk_5.pt"
+output_dir: "l2sml/outputs/q_function"
+run_name: "q_function"
+
+seed: 0
+device: "cuda"
+
+hidden_dim: 256
+epochs: 100
+batch_size: 256
+learning_rate: 0.001
+weight_decay: 0.0
+train_split: 0.9
+grad_clip_norm: 0.0
+
+num_workers: 0
+pin_memory: false
+log_every: 10
+save_every: 50

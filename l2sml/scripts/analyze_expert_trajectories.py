@@ -185,6 +185,73 @@ def _plot_action_stats(action_sums: np.ndarray, action_sq_sums: np.ndarray, acti
     plt.close()
 
 
+def _to_numpy(value: Any) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _extract_positions_xyz(data: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    ee_xyz = data["ee_positions"]
+    ins_xyz = data["insertive_positions"]
+    rec_xyz = data["receptive_positions"]
+    ee_xyz = _to_numpy(ee_xyz)
+    ins_xyz = _to_numpy(ins_xyz)
+    rec_xyz = _to_numpy(rec_xyz)
+    return ee_xyz, ins_xyz, rec_xyz
+
+
+def _plot_pose_3d_single_traj(
+    traj_id: int,
+    ee_xyz: np.ndarray,
+    ins_xyz: np.ndarray,
+    rec_xyz: np.ndarray,
+    out_path: Path,
+) -> None:
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    ax.plot(
+        ee_xyz[:, 0],
+        ee_xyz[:, 1],
+        ee_xyz[:, 2],
+        color="tab:blue",
+        alpha=0.75,
+        linewidth=1.2,
+        label="end_effector_position",
+    )
+    ax.plot(
+        ins_xyz[:, 0],
+        ins_xyz[:, 1],
+        ins_xyz[:, 2],
+        color="tab:orange",
+        alpha=0.75,
+        linewidth=1.2,
+        label="insertive_position",
+    )
+    ax.plot(
+        rec_xyz[:, 0],
+        rec_xyz[:, 1],
+        rec_xyz[:, 2],
+        color="tab:green",
+        alpha=0.75,
+        linewidth=1.2,
+        label="receptive_position",
+    )
+    ax.scatter(ee_xyz[0, 0], ee_xyz[0, 1], ee_xyz[0, 2], color="tab:blue", s=12, alpha=0.8)
+    ax.scatter(ins_xyz[0, 0], ins_xyz[0, 1], ins_xyz[0, 2], color="tab:orange", s=12, alpha=0.8)
+    ax.scatter(rec_xyz[0, 0], rec_xyz[0, 1], rec_xyz[0, 2], color="tab:green", s=12, alpha=0.8)
+
+    ax.set_title(f"3D Position Trajectory (traj {traj_id:06d})")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("z")
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def main() -> None:
     args = _parse_args()
     random.seed(args.seed)
@@ -212,7 +279,10 @@ def main() -> None:
 
     candidates_for_video: list[tuple[int, Path, np.ndarray]] = []
     all_reward_curves: list[tuple[int, np.ndarray]] = []
+    pose_items_90_100: list[tuple[int, np.ndarray, np.ndarray, np.ndarray]] = []
 
+    idx = 0
+    idx_limit = 100
     for traj_path in traj_files:
         data = _load_traj(traj_path)
         traj_id = _extract_traj_id(traj_path)
@@ -270,6 +340,20 @@ def main() -> None:
         if frames is not None:
             candidates_for_video.append((traj_id, traj_path, frames))
 
+        if 90 <= traj_id <= 100:
+            positions_xyz = _extract_positions_xyz(data)
+            if positions_xyz is not None:
+                ee_xyz, ins_xyz, rec_xyz = positions_xyz
+                min_len = min(ee_xyz.shape[0], ins_xyz.shape[0], rec_xyz.shape[0])
+                if min_len > 0:
+                    ee_xyz = ee_xyz[:min_len]
+                    ins_xyz = ins_xyz[:min_len]
+                    rec_xyz = rec_xyz[:min_len]
+
+                    pose_items_90_100.append(
+                        (traj_id, ee_xyz, ins_xyz, rec_xyz)
+                    )
+
     summary_json = {
         "dataset_dir": str(dataset_dir.resolve()),
         "num_trajectories": len(summaries),
@@ -318,6 +402,17 @@ def main() -> None:
     if all_reward_curves:
         _plot_reward_curves(all_reward_curves, plots_dir / "reward_per_step.png")
         _plot_cumulative_reward_curves(all_reward_curves, plots_dir / "cumulative_reward.png")
+    if pose_items_90_100:
+        pose_plots_dir = plots_dir / "poses_3d_traj_90_100"
+        pose_plots_dir.mkdir(parents=True, exist_ok=True)
+        for traj_id, ee_xyz, ins_xyz, rec_xyz in pose_items_90_100:
+            _plot_pose_3d_single_traj(
+                traj_id,
+                ee_xyz,
+                ins_xyz,
+                rec_xyz,
+                pose_plots_dir / f"poses_3d_traj_{traj_id:06d}.png",
+            )
 
     if candidates_for_video:
         random.shuffle(candidates_for_video)

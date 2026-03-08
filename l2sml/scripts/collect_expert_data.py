@@ -35,6 +35,7 @@ def _build_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
     parser.add_argument(
         "--agent", type=str, default=config.get("agent", "rsl_rl_cfg_entry_point"), help="RL agent config entry point."
     )
+    parser.add_argument("--action_std", type=float, default=float(config.get("action_std", 0.0)), help="Action noise standard deviation.")
     parser.add_argument("--expert_checkpoint", type=str, default=None, help="Alias for --checkpoint.")
     parser.add_argument("--output_dir", type=str, default=config.get("output_dir", "data/peg_expert"))
     parser.add_argument("--num_trajectories", type=int, default=int(config.get("num_trajectories", 1000)))
@@ -100,7 +101,20 @@ def _build_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
         help="When rendering is enabled, also store frames under obs_images[render_image_obs_key].",
     )
     parser.add_argument(
+        "--collect_positions",
+        "--collect-positions",
+        action=argparse.BooleanOptionalAction,
+        default=bool(config.get("collect_positions", config.get("collect positions", False))),
+        help="Store xyz positions from positions obs group into ee/insertive/receptive trajectory fields.",
+    )
+    parser.add_argument(
         "--disable_fabric", action="store_true", default=bool(config.get("disable_fabric", False)), help="Disable fabric."
+    )
+    parser.add_argument(
+        "--exact_success",
+        action=argparse.BooleanOptionalAction,
+        default=bool(config.get("exact_success", False)),
+        help="If true, use get_successes(env); otherwise use get_successes_approx(rewards).",
     )
     cli_args.add_rsl_rl_args(parser)
     parser.set_defaults(checkpoint=config.get("checkpoint", config.get("expert_checkpoint", "peg_state_rl_expert.pt")))
@@ -215,11 +229,14 @@ def _make_env_from_cfg(
     env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
     *,
     concatenate_policy_terms: bool,
+    concatenate_positions_terms: bool,
     render_mode: str | None,
 ) -> gym.Env:
     env_cfg_local = copy.deepcopy(env_cfg)
     env_cfg_local.recorders = None
     env_cfg_local.observations.policy.concatenate_terms = concatenate_policy_terms
+    if hasattr(env_cfg_local.observations, "positions"):
+        env_cfg_local.observations.positions.concatenate_terms = concatenate_positions_terms
     env = gym.make(args_cli.task, cfg=env_cfg_local, render_mode=render_mode)
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
@@ -257,13 +274,60 @@ def _tensordict_to_dict(obs):
     return obs
 
 
+def _extract_xyz_terms_from_positions_obs(positions_obs: Any) -> dict[str, torch.Tensor]:
+    positions_obs = _tensordict_to_dict(positions_obs)
+    if isinstance(positions_obs, dict):
+        required_terms = {
+            "ee_positions": "end_effector_pose",
+            "insertive_positions": "insertive_asset_pose",
+            "receptive_positions": "receptive_asset_pose",
+        }
+        xyz_terms: dict[str, torch.Tensor] = {}
+        for out_key, obs_key in required_terms.items():
+            pose = positions_obs.get(obs_key)
+            if pose is None:
+                raise RuntimeError(
+                    f"collect_positions=True requires observations['positions']['{obs_key}'] to be available."
+                )
+            if not isinstance(pose, torch.Tensor):
+                raise RuntimeError(f"collect_positions=True expected positions.{obs_key} to be a torch.Tensor.")
+            if pose.ndim == 1:
+                pose = pose.view(1, -1)
+            if pose.shape[-1] < 3:
+                raise RuntimeError(
+                    f"collect_positions=True expected positions.{obs_key} with >=3 dims, got shape={tuple(pose.shape)}."
+                )
+            xyz_terms[out_key] = pose[..., :3]
+        return xyz_terms
+    if isinstance(positions_obs, torch.Tensor):
+        if positions_obs.ndim == 1:
+            positions_obs = positions_obs.view(1, -1)
+        if positions_obs.shape[-1] < 9:
+            raise RuntimeError(
+                f"collect_positions=True expected positions observation with >=9 dims, got shape={tuple(positions_obs.shape)}."
+            )
+        block_size = positions_obs.shape[-1] // 3
+        if block_size < 3:
+            raise RuntimeError(
+                f"collect_positions=True expected each positions term to have >=3 dims, got block_size={block_size}."
+            )
+        return {
+            "ee_positions": positions_obs[..., 0:3],
+            "insertive_positions": positions_obs[..., block_size : block_size + 3],
+            "receptive_positions": positions_obs[..., 2 * block_size : 2 * block_size + 3],
+        }
+    raise RuntimeError(
+        f"collect_positions=True got unsupported positions observation type: {type(positions_obs)}."
+    )
+
+
 def _save_run_manifest(output_dir: Path, manifest: dict[str, Any]) -> None:
     with open(output_dir / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
 
-def _trajectory_template() -> dict[str, Any]:
-    return {
+def _trajectory_template(*, collect_positions: bool = False) -> dict[str, Any]:
+    traj = {
         "actions": [],
         "rewards": [],
         "terminated": [],
@@ -275,6 +339,11 @@ def _trajectory_template() -> dict[str, Any]:
         "obs_other_state": {},
         "rendered_images": [],
     }
+    if collect_positions:
+        traj["ee_positions"] = []
+        traj["insertive_positions"] = []
+        traj["receptive_positions"] = []
+    return traj
 
 
 def _append_obs_to_trajectory(
@@ -286,6 +355,9 @@ def _append_obs_to_trajectory(
     asset_keys: list[str],
     image_keys: list[str],
     other_keys: list[str],
+    *,
+    collect_positions: bool = False,
+    position_terms_xyz: dict[str, torch.Tensor] | None = None,
 ) -> None:
     traj["obs_flat"].append(_to_cpu_detached(obs_flat[env_idx : env_idx + 1]))
     for key in proprio_keys:
@@ -296,9 +368,19 @@ def _append_obs_to_trajectory(
         traj["obs_images"].setdefault(key, []).append(_to_cpu_detached(policy_obs[key][env_idx : env_idx + 1]))
     for key in other_keys:
         traj["obs_other_state"].setdefault(key, []).append(_to_cpu_detached(policy_obs[key][env_idx : env_idx + 1]))
+    if collect_positions:
+        if position_terms_xyz is None:
+            raise RuntimeError("collect_positions=True but positions observation was not provided.")
+        traj["ee_positions"].append(_to_cpu_detached(position_terms_xyz["ee_positions"][env_idx : env_idx + 1]))
+        traj["insertive_positions"].append(
+            _to_cpu_detached(position_terms_xyz["insertive_positions"][env_idx : env_idx + 1])
+        )
+        traj["receptive_positions"].append(
+            _to_cpu_detached(position_terms_xyz["receptive_positions"][env_idx : env_idx + 1])
+        )
 
 
-def _finalize_trajectory(traj: dict[str, Any]) -> dict[str, Any]:
+def _finalize_trajectory(traj: dict[str, Any], success: float | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     out["actions"] = torch.cat(traj["actions"], dim=0) if traj["actions"] else torch.empty(0)
     out["rewards"] = torch.cat(traj["rewards"], dim=0) if traj["rewards"] else torch.empty(0)
@@ -322,6 +404,16 @@ def _finalize_trajectory(traj: dict[str, Any]) -> dict[str, Any]:
         out["rendered_images"] = np.stack(traj["rendered_images"], axis=0)
     else:
         out["rendered_images"] = np.empty((0,), dtype=np.uint8)
+    if "ee_positions" in traj:
+        out["ee_positions"] = torch.cat(traj["ee_positions"], dim=0) if traj["ee_positions"] else torch.empty((0, 3))
+        out["insertive_positions"] = (
+            torch.cat(traj["insertive_positions"], dim=0) if traj["insertive_positions"] else torch.empty((0, 3))
+        )
+        out["receptive_positions"] = (
+            torch.cat(traj["receptive_positions"], dim=0) if traj["receptive_positions"] else torch.empty((0, 3))
+        )
+    if success is not None:
+        out["success"] = float(success)
     return out
 
 
@@ -332,8 +424,9 @@ def _save_trajectory(
     output_dir: Path,
     manifest: dict[str, Any],
     done: bool,
+    success: float,
 ) -> None:
-    serialized = _finalize_trajectory(traj)
+    serialized = _finalize_trajectory(traj, success=success)
     traj_file = traj_dir / f"traj_{traj_idx:06d}.pt"
     torch.save(serialized, traj_file)
     manifest["files"].append(
@@ -342,8 +435,18 @@ def _save_trajectory(
             "file": str(traj_file.relative_to(output_dir)),
             "steps": int(serialized["actions"].shape[0]),
             "done": done,
+            "success": success,
         }
     )
+
+def get_successes(env: RslRlVecEnvWrapper) -> torch.Tensor:
+    successes = torch.zeros((env.num_envs,), device=env.device)
+    for i in range(env.num_envs):
+        successes[i] = env.unwrapped.reward_manager.get_active_iterable_terms(i)[7][1][0]
+    return successes
+
+def get_successes_approx(rew: torch.Tensor) -> torch.Tensor:
+    return torch.where(rew > 0.05, 1.0, 0.0)
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -360,6 +463,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     gym_env = _make_env_from_cfg(
         env_cfg,
         concatenate_policy_terms=True,
+        concatenate_positions_terms=False,
         render_mode="rgb_array" if args_cli.capture_rendered_images else None,
     )
     env = RslRlVecEnvWrapper(gym_env, clip_actions=agent_cfg.clip_actions)
@@ -394,12 +498,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     target = args_cli.num_trajectories
     collected = 0
-    trajectories: list[dict[str, Any]] = [_trajectory_template() for _ in range(num_envs)]
+    trajectories: list[dict[str, Any]] = [
+        _trajectory_template(collect_positions=args_cli.collect_positions) for _ in range(num_envs)
+    ]
     step_counts = [0] * num_envs
 
     try:
         obs = _tensordict_to_dict(env.get_observations())
-
+        noise = torch.randn((num_envs,env.num_actions), device=env.device)
         while collected < target:
             obs_flat = obs["policy"]
             policy_obs_raw = _split_policy_obs(obs_flat, policy_term_names, policy_term_slices)
@@ -407,6 +513,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             proprio_keys, asset_keys, image_keys, other_keys = _classify_obs_keys(
                 policy_obs_raw, args_cli.proprio_keys, args_cli.asset_keys, args_cli.image_keys
             )
+            position_terms_xyz = None
+            if args_cli.collect_positions:
+                position_terms_xyz = _extract_xyz_terms_from_positions_obs(obs.get("positions"))
 
             for ei in range(num_envs):
                 if collected >= target:
@@ -414,10 +523,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _append_obs_to_trajectory(
                     trajectories[ei], policy_obs_raw, obs_flat, ei,
                     proprio_keys, asset_keys, image_keys, other_keys,
+                    collect_positions=args_cli.collect_positions,
+                    position_terms_xyz=position_terms_xyz,
                 )
 
             with torch.inference_mode():
-                action = policy(obs)
+                action = policy(obs) # + noise
+                # action = action + torch.randn_like(action) * args_cli.action_std
 
             obs, rew, dones, extras = env.step(action)
             time_outs = extras.get("time_outs", torch.zeros_like(dones))
@@ -439,11 +551,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 horizon_hit = step_counts[ei] >= args_cli.horizon
 
                 if env_done or horizon_hit:
+                    if args_cli.exact_success:
+                        success_tensor = get_successes(env)
+                        success_val = float(success_tensor[ei].item())
+                    else:
+                        traj_rew = torch.cat(trajectories[ei]["rewards"], dim=0)
+                        success_val = float(get_successes_approx(traj_rew).any().item())
                     _save_trajectory(
-                        trajectories[ei], collected, traj_dir, output_dir, manifest, env_done,
+                        trajectories[ei], collected, traj_dir, output_dir, manifest, env_done, success_val,
                     )
                     collected += 1
-                    trajectories[ei] = _trajectory_template()
+                    trajectories[ei] = _trajectory_template(collect_positions=args_cli.collect_positions)
                     step_counts[ei] = 0
 
                     if collected % args_cli.save_every == 0 or collected == target:
