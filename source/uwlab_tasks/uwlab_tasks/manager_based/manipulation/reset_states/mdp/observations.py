@@ -13,6 +13,9 @@ from isaaclab.managers import ManagerTermBase, ObservationTermCfg, SceneEntityCf
 from uwlab_tasks.manager_based.manipulation.reset_states.assembly_keypoints import Offset
 from uwlab_tasks.manager_based.manipulation.reset_states.mdp import utils
 
+import torch.nn.functional as F
+from isaaclab.sensors import Camera, RayCasterCamera, TiledCamera
+
 
 def target_asset_pose_in_root_asset_frame(
     env: ManagerBasedEnv,
@@ -199,3 +202,72 @@ def time_left(env) -> torch.Tensor:
     else:
         life_left = torch.zeros(env.num_envs, device=env.device, dtype=torch.float)
     return life_left.view(-1, 1)
+
+def process_image(
+    env: ManagerBasedEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("tiled_camera"),
+    data_type: str = "rgb",
+    process_image: bool = True,
+    output_size: tuple = (224, 224),
+) -> torch.Tensor:
+    """Images of a specific datatype from the camera sensor.
+
+    If the flag :attr:`normalize` is True, post-processing of the images are performed based on their
+    data-types:
+
+    - "rgb": Scales the image to (0, 1) and subtracts with the mean of the current image batch.
+    - "depth" or "distance_to_camera" or "distance_to_plane": Replaces infinity values with zero.
+
+    Args:
+        env: The environment the cameras are placed within.
+        sensor_cfg: The desired sensor to read from. Defaults to SceneEntityCfg("tiled_camera").
+        data_type: The data type to pull from the desired camera. Defaults to "rgb".
+        process_image: Whether to normalize the image. Defaults to True.
+
+    Returns:
+        The images produced at the last time-step
+    """
+    assert data_type == "rgb", "Only RGB images are supported for now."
+    # extract the used quantities (to enable type-hinting)
+    sensor: TiledCamera | Camera | RayCasterCamera = env.scene.sensors[sensor_cfg.name]
+
+    # obtain the input image
+    images = sensor.data.output[data_type].clone()
+
+    start_dims = torch.arange(len(images.shape) - 3).tolist()
+    s = start_dims[-1] if len(start_dims) > 0 else -1
+    current_size = (images.shape[s + 1], images.shape[s + 2])
+
+    # Convert to float32 and normalize in-place
+    images = images.to(dtype=torch.float32)  # Avoid redundant .float() and .type() calls
+    images.div_(255.0).clamp_(0.0, 1.0)  # Normalize and clip in-place
+    images = images.permute(start_dims + [s + 3, s + 1, s + 2])
+
+    if current_size != output_size:
+        # Perform resize operation
+        images = F.interpolate(images, size=output_size, mode="bilinear", antialias=True)
+
+    # rgb/depth image normalization
+    if not process_image:
+        # Reverse the permutation
+        reverse_dims = torch.argsort(torch.tensor(start_dims + [s + 3, s + 1, s + 2]))
+        images = images.permute(reverse_dims.tolist())
+        # Convert back to uint8 in-place
+        images.mul_(255.0).clamp_(0, 255)  # Scale and clamp in-place
+        images = images.to(dtype=torch.uint8)  # Type conversion (not in-place)
+
+    # import matplotlib.pyplot as plt
+    # img_0 = images[0].permute([1, 2, 0])
+    # plt.imshow(img_0.cpu().numpy())
+    # plt.savefig('saved_image_0.png', dpi=300, bbox_inches='tight')
+    # img_1 = images[1].permute([1, 2, 0])
+    # plt.imshow(img_1.cpu().numpy())
+    # plt.savefig('saved_image_1.png', dpi=300, bbox_inches='tight')
+    # img_2 = images[2].permute([1, 2, 0])
+    # plt.imshow(img_2.cpu().numpy())
+    # plt.savefig('saved_image_2.png', dpi=300, bbox_inches='tight')
+    # img_3 = images[3].permute([1, 2, 0])
+    # plt.imshow(img_3.cpu().numpy())
+    # plt.savefig('saved_image_3.png', dpi=300, bbox_inches='tight')
+
+    return images

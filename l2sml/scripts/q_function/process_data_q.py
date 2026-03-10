@@ -38,6 +38,12 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="Optional cap for debugging. 0 means all.",
     )
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=0.97,
+        help="Discount factor for return-to-go calculations.",
+    )
     return parser.parse_args()
 
 
@@ -116,7 +122,7 @@ def main() -> None:
     if args.chunk_size <= 0:
         raise ValueError(f"chunk_size must be positive, got {args.chunk_size}")
 
-    gamma = 0.99
+    gamma = args.gamma
     input_path = Path(args.trajectory_path)
     traj_files = _resolve_trajectory_files(input_path)
     if args.max_trajs > 0:
@@ -126,9 +132,9 @@ def main() -> None:
 
     if args.output_path is None:
         if input_path.is_dir():
-            output_path = input_path / f"q_data_chunk_{args.chunk_size}.pt"
+            output_path = input_path / f"q_data_chunk_{args.chunk_size}_gamma_{args.gamma}.pt"
         else:
-            output_path = input_path.with_name(f"{input_path.stem}_q_data_chunk_{args.chunk_size}.pt")
+            output_path = input_path.with_name(f"{input_path.stem}_q_data_chunk_{args.chunk_size}_gamma_{args.gamma}.pt")
     else:
         output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

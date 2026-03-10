@@ -1,6 +1,6 @@
-data_path: "data/peg_expert/trajectories/q_data_chunk_5.pt"
-output_dir: "l2sml/outputs/q_function"
-run_name: "q_function"
+data_path: "data/peg_expert/trajectories/q_data_chunk_5_gamma_0.97.pt"
+output_dir: "l2sml/outputs/q_function_gamma_0.97"
+run_name: "q_function_gamma_0.97"
 
 seed: 0
 device: "cuda"

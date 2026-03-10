@@ -1,4 +1,4 @@
-task: "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0"
+task: "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-RGB-DataCollection-v0"
 agent: "rsl_rl_cfg_entry_point"
 checkpoint: "expert_policies/peg_state_rl_expert.pt"
 output_dir: "data/peg_expert_test"
@@ -29,3 +29,4 @@ required_obs_keys:
   - "insertive_asset_pose"
   - "receptive_asset_pose"
   - "insertive_asset_in_receptive_asset_frame"
+exact_success: true

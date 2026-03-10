@@ -91,14 +91,14 @@ def _build_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
         "--capture-rendered-images",
         action=argparse.BooleanOptionalAction,
         default=bool(config.get("capture_rendered_images", False)),
-        help="Capture rendered RGB frame via env.render() every step.",
+        help="Capture a stitched front/side RGB video frame every step.",
     )
     parser.add_argument(
         "--render_image_obs_key",
         "--render-image-obs-key",
         type=str,
         default=str(config.get("render_image_obs_key", "render_rgb")),
-        help="When rendering is enabled, also store frames under obs_images[render_image_obs_key].",
+        help="When rendering is enabled, also store stitched frames under obs_images[render_image_obs_key].",
     )
     parser.add_argument(
         "--collect_positions",
@@ -166,6 +166,62 @@ def _is_image_tensor(value: torch.Tensor) -> bool:
 
 def _to_cpu_detached(value: torch.Tensor) -> torch.Tensor:
     return value.detach().cpu()
+
+
+def _image_tensor_to_uint8_frame(value: torch.Tensor) -> np.ndarray:
+    tensor = value.detach().cpu()
+    if tensor.ndim == 4 and tensor.shape[0] == 1:
+        tensor = tensor[0]
+    if tensor.ndim != 3:
+        raise RuntimeError(f"Expected image tensor with 3 dims, got shape={tuple(tensor.shape)}.")
+
+    if tensor.shape[0] in (1, 3, 4):
+        tensor = tensor.permute(1, 2, 0)
+    elif tensor.shape[-1] not in (1, 3, 4):
+        raise RuntimeError(
+            f"Expected image tensor in CHW or HWC format with 1/3/4 channels, got shape={tuple(tensor.shape)}."
+        )
+
+    frame = tensor.numpy()
+    if np.issubdtype(frame.dtype, np.floating):
+        if frame.size and float(frame.max()) <= 1.0:
+            frame = frame * 255.0
+        frame = np.clip(frame, 0.0, 255.0)
+    else:
+        frame = np.clip(frame, 0, 255)
+    frame = frame.astype(np.uint8)
+
+    if frame.shape[-1] == 1:
+        frame = np.repeat(frame, 3, axis=-1)
+    elif frame.shape[-1] == 4:
+        frame = frame[..., :3]
+    return frame
+
+
+def _compose_rendered_camera_frame(obs: dict[str, Any], env_idx: int) -> np.ndarray:
+    camera_obs = _tensordict_to_dict(obs.get("cameras"))
+    if not isinstance(camera_obs, dict):
+        raise RuntimeError(
+            "capture_rendered_images=True requires observations['cameras'] with front_rgb and side_rgb terms."
+        )
+
+    front_rgb = camera_obs.get("front_rgb")
+    side_rgb = camera_obs.get("side_rgb")
+    if not isinstance(front_rgb, torch.Tensor) or not isinstance(side_rgb, torch.Tensor):
+        available_keys = sorted(camera_obs.keys())
+        raise RuntimeError(
+            "capture_rendered_images=True requires camera observations 'front_rgb' and 'side_rgb'. "
+            f"Available camera keys: {available_keys}"
+        )
+
+    front_frame = _image_tensor_to_uint8_frame(front_rgb[env_idx])
+    side_frame = _image_tensor_to_uint8_frame(side_rgb[env_idx])
+    if front_frame.shape[0] != side_frame.shape[0]:
+        raise RuntimeError(
+            "Front and side camera heights must match to compose rendered video frames, "
+            f"got {front_frame.shape} and {side_frame.shape}."
+        )
+    return np.concatenate((front_frame, side_frame), axis=1)
 
 
 def _normalize_obs_dict(policy_obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -526,6 +582,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     collect_positions=args_cli.collect_positions,
                     position_terms_xyz=position_terms_xyz,
                 )
+                if args_cli.capture_rendered_images:
+                    rendered_frame = _compose_rendered_camera_frame(obs, ei)
+                    trajectories[ei]["rendered_images"].append(rendered_frame)
+                    trajectories[ei]["obs_images"].setdefault(args_cli.render_image_obs_key, []).append(
+                        torch.from_numpy(rendered_frame.copy()).unsqueeze(0)
+                    )
 
             with torch.inference_mode():
                 action = policy(obs) # + noise
