@@ -1,0 +1,2 @@
+data_path: "data/peg_expert/trajectories/q_data_chunk_5_gamma_0.97.pt"
+pi_expert_checkpoint: "expert_policies/peg_state_rl_expert.pt"

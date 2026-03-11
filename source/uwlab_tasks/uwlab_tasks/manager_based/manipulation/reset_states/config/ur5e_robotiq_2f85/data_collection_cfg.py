@@ -106,7 +106,59 @@ class DataCollectionObservationsCfg(ObservationsCfg):
             self.enable_corruption = False
             self.concatenate_terms = True
             self.history_length = 1
+
+    @configclass
+    class DataCollectionObservationsCfg(ObsGroup):
+        """Observations for policy group."""
+        prev_actions = ObsTerm(func=task_mdp.last_action)
+
+        joint_pos = ObsTerm(func=task_mdp.joint_pos)
+
+        end_effector_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame_with_metadata,
+            params={
+                "target_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+                "target_asset_offset_metadata_key": "gripper_offset",
+                "root_asset_offset_metadata_key": "offset",
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        insertive_asset_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame_with_metadata,
+            params={
+                "target_asset_cfg": SceneEntityCfg("insertive_object"),
+                "root_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
+                "root_asset_offset_metadata_key": "gripper_offset",
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        receptive_asset_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("receptive_object"),
+                "root_asset_cfg": SceneEntityCfg("robot", body_names="robotiq_base_link"),
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        insertive_asset_in_receptive_asset_frame: ObsTerm = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("insertive_object"),
+                "root_asset_cfg": SceneEntityCfg("receptive_object"),
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = False
+
     positions: PositionsCfg = PositionsCfg()
+    data_collection: DataCollectionObservationsCfg = DataCollectionObservationsCfg()
 
 @configclass
 class DataCollectionRGBObservationsCfg(DataCollectionObservationsCfg):

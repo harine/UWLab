@@ -10,6 +10,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from tqdm import tqdm
 
 import yaml
 from isaaclab.app import AppLauncher
@@ -562,73 +563,84 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     try:
         obs = _tensordict_to_dict(env.get_observations())
         noise = torch.randn((num_envs,env.num_actions), device=env.device)
-        while collected < target:
-            obs_flat = obs["policy"]
-            policy_obs_raw = _split_policy_obs(obs_flat, policy_term_names, policy_term_slices)
-            _validate_required_obs_keys(policy_obs_raw, args_cli.required_obs_keys)
-            proprio_keys, asset_keys, image_keys, other_keys = _classify_obs_keys(
-                policy_obs_raw, args_cli.proprio_keys, args_cli.asset_keys, args_cli.image_keys
-            )
-            position_terms_xyz = None
-            if args_cli.collect_positions:
-                position_terms_xyz = _extract_xyz_terms_from_positions_obs(obs.get("positions"))
-
-            for ei in range(num_envs):
-                if collected >= target:
-                    break
-                _append_obs_to_trajectory(
-                    trajectories[ei], policy_obs_raw, obs_flat, ei,
-                    proprio_keys, asset_keys, image_keys, other_keys,
-                    collect_positions=args_cli.collect_positions,
-                    position_terms_xyz=position_terms_xyz,
+        with tqdm(total=target, desc="Collecting trajectories") as pbar:
+            while collected < target:
+                obs_flat = obs["policy"]
+                policy_obs_raw = _split_policy_obs(obs_flat, policy_term_names, policy_term_slices)
+                _validate_required_obs_keys(policy_obs_raw, args_cli.required_obs_keys)
+                proprio_keys, asset_keys, image_keys, other_keys = _classify_obs_keys(
+                    policy_obs_raw, args_cli.proprio_keys, args_cli.asset_keys, args_cli.image_keys
                 )
-                if args_cli.capture_rendered_images:
-                    rendered_frame = _compose_rendered_camera_frame(obs, ei)
-                    trajectories[ei]["rendered_images"].append(rendered_frame)
-                    trajectories[ei]["obs_images"].setdefault(args_cli.render_image_obs_key, []).append(
-                        torch.from_numpy(rendered_frame.copy()).unsqueeze(0)
+                position_terms_xyz = None
+                if args_cli.collect_positions:
+                    position_terms_xyz = _extract_xyz_terms_from_positions_obs(obs.get("positions"))
+
+                cameras_obs = _tensordict_to_dict(obs.get("cameras")) if obs.get("cameras") is not None else {}
+                if not isinstance(cameras_obs, dict):
+                    cameras_obs = {}
+
+                for ei in range(num_envs):
+                    if collected >= target:
+                        break
+                    _append_obs_to_trajectory(
+                        trajectories[ei], policy_obs_raw, obs_flat, ei,
+                        proprio_keys, asset_keys, image_keys, other_keys,
+                        collect_positions=args_cli.collect_positions,
+                        position_terms_xyz=position_terms_xyz,
                     )
+                    for cam_key, cam_tensor in cameras_obs.items():
+                        if isinstance(cam_tensor, torch.Tensor) and _is_image_tensor(cam_tensor):
+                            trajectories[ei]["obs_images"].setdefault(cam_key, []).append(
+                                _to_cpu_detached(cam_tensor[env_idx : env_idx + 1])
+                            )
+                    # if args_cli.capture_rendered_images:
+                    #     rendered_frame = _compose_rendered_camera_frame(obs, ei)
+                    #     trajectories[ei]["rendered_images"].append(rendered_frame)
+                    #     trajectories[ei]["obs_images"].setdefault(args_cli.render_image_obs_key, []).append(
+                    #         torch.from_numpy(rendered_frame.copy()).unsqueeze(0)
+                    #     )
 
-            with torch.inference_mode():
-                action = policy(obs) # + noise
-                # action = action + torch.randn_like(action) * args_cli.action_std
+                with torch.inference_mode():
+                    action = policy(obs) # + noise
+                    # action = action + torch.randn_like(action) * args_cli.action_std
 
-            obs, rew, dones, extras = env.step(action)
-            time_outs = extras.get("time_outs", torch.zeros_like(dones))
+                obs, rew, dones, extras = env.step(action)
+                time_outs = extras.get("time_outs", torch.zeros_like(dones))
 
-            for ei in range(num_envs):
-                if collected >= target:
-                    break
-                trajectories[ei]["actions"].append(_to_cpu_detached(action[ei : ei + 1]))
-                trajectories[ei]["rewards"].append(_to_cpu_detached(rew[ei : ei + 1].view(1, 1)))
-                trajectories[ei]["terminated"].append(
-                    _to_cpu_detached((dones[ei] & ~time_outs[ei]).float().view(1, 1))
-                )
-                trajectories[ei]["truncated"].append(
-                    _to_cpu_detached(time_outs[ei].float().view(1, 1))
-                )
-                step_counts[ei] += 1
-
-                env_done = bool(dones[ei].item())
-                horizon_hit = step_counts[ei] >= args_cli.horizon
-
-                if env_done or horizon_hit:
-                    if args_cli.exact_success:
-                        success_tensor = get_successes(env)
-                        success_val = float(success_tensor[ei].item())
-                    else:
-                        traj_rew = torch.cat(trajectories[ei]["rewards"], dim=0)
-                        success_val = float(get_successes_approx(traj_rew).any().item())
-                    _save_trajectory(
-                        trajectories[ei], collected, traj_dir, output_dir, manifest, env_done, success_val,
+                for ei in range(num_envs):
+                    if collected >= target:
+                        break
+                    trajectories[ei]["actions"].append(_to_cpu_detached(action[ei : ei + 1]))
+                    trajectories[ei]["rewards"].append(_to_cpu_detached(rew[ei : ei + 1].view(1, 1)))
+                    trajectories[ei]["terminated"].append(
+                        _to_cpu_detached((dones[ei] & ~time_outs[ei]).float().view(1, 1))
                     )
-                    collected += 1
-                    trajectories[ei] = _trajectory_template(collect_positions=args_cli.collect_positions)
-                    step_counts[ei] = 0
+                    trajectories[ei]["truncated"].append(
+                        _to_cpu_detached(time_outs[ei].float().view(1, 1))
+                    )
+                    step_counts[ei] += 1
 
-                    if collected % args_cli.save_every == 0 or collected == target:
-                        _save_run_manifest(output_dir, manifest)
-                        print(f"[INFO] Collected {collected}/{target} trajectories.")
+                    env_done = bool(dones[ei].item())
+                    horizon_hit = step_counts[ei] >= args_cli.horizon
+
+                    if env_done or horizon_hit:
+                        if args_cli.exact_success:
+                            success_tensor = get_successes(env)
+                            success_val = float(success_tensor[ei].item())
+                        else:
+                            traj_rew = torch.cat(trajectories[ei]["rewards"], dim=0)
+                            success_val = float(get_successes_approx(traj_rew).any().item())
+                        _save_trajectory(
+                            trajectories[ei], collected, traj_dir, output_dir, manifest, env_done, success_val,
+                        )
+                        collected += 1
+                        pbar.update(1)
+                        trajectories[ei] = _trajectory_template(collect_positions=args_cli.collect_positions)
+                        step_counts[ei] = 0
+
+                        if collected % args_cli.save_every == 0 or collected == target:
+                            _save_run_manifest(output_dir, manifest)
+                            print(f"[INFO] Collected {collected}/{target} trajectories.")
 
     finally:
         env.close()

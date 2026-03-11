@@ -76,3 +76,35 @@ class GraspRelativePoseRecorder(RecorderTerm):
         }
 
         return "grasp_relative_pose", grasp_data
+
+
+class PreStepDataCollectionObservationsRecorder(RecorderTerm):
+    """Recorder term that records data collection observations from the data_collection observation group."""
+
+    def record_pre_step(self):
+        """Record data collection observations from the data_collection observation group."""
+        return "obs", self._env.obs_buf["data_collection"]
+
+class CameraDataRecorder(RecorderTerm):
+    """Recorder term that records camera data from the cameras observation group."""
+
+    def record_pre_step(self):
+        """Record camera data from the cameras observation group."""
+        if "cameras" not in self._env.obs_buf:
+            return "camera", None
+        return "camera", self._env.obs_buf["cameras"]
+
+class PositionDataRecorder(RecorderTerm):
+    """Recorder term that records position data from the position observation group."""
+
+    def record_pre_step(self):
+        """Record position data from the position observation group."""
+        return "positions", self._env.obs_buf["positions"]
+
+class RewardDataRecorder(RecorderTerm):
+    """Recorder term that records reward data from the reward observation group."""
+
+    def record_post_step(self):
+        """Record reward data from the reward observation group."""
+        return "rewards", self._env.reward_buf
+

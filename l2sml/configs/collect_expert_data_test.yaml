@@ -4,7 +4,7 @@ checkpoint: "expert_policies/peg_state_rl_expert.pt"
 output_dir: "data/peg_expert_test"
 num_trajectories: 100
 horizon: 800
-num_envs: 1024
+num_envs: 64
 seed: 0
 save_every: 25
 disable_fabric: false

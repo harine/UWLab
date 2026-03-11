@@ -16,3 +16,7 @@ matplotlib
 warp-lang
 # learning
 gymnasium
+
+# datasets
+zarr<3
+numcodecs<0.16
