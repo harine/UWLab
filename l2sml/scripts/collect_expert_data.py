@@ -458,14 +458,14 @@ def _to_nested_tensordict(data: dict[str, Any]) -> TensorDict:
         if isinstance(value, dict):
             converted[key] = _to_nested_tensordict(value)
         elif isinstance(value, torch.Tensor):
-            converted[key] = value
+            converted[key] = value.detach().cpu()
         elif isinstance(value, np.ndarray):
             converted[key] = torch.from_numpy(value)
         elif isinstance(value, (float, int, bool)):
             converted[key] = torch.tensor(value)
         else:
             raise TypeError(f"Unsupported value type for TensorDict conversion at key '{key}': {type(value)}")
-    return TensorDict(converted, batch_size=[])
+    return TensorDict(converted, batch_size=[]).cpu()
 
 
 def _trajectory_key(traj_idx: int) -> str:
@@ -473,7 +473,7 @@ def _trajectory_key(traj_idx: int) -> str:
 
 
 def _save_trajectory_dataset(dataset: dict[str, TensorDict], dataset_file: Path) -> None:
-    torch.save(TensorDict(dataset, batch_size=[]), dataset_file)
+    torch.save(TensorDict(dataset, batch_size=[]).cpu(), dataset_file)
 
 
 def _save_trajectory(
@@ -568,7 +568,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     try:
         obs = _tensordict_to_dict(env.get_observations())
-        noise = torch.randn(obs["policy"].shape, device=env.device) * args_cli.action_std
+        # noise = torch.randn(obs["policy"].shape, device=env.device) * args_cli.action_std
         with tqdm(total=target, desc="Collecting trajectories") as pbar:
             while collected < target:
                 obs_flat = obs["policy"]
@@ -602,9 +602,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 )
 
                 with torch.inference_mode():
-                    obs["policy"] = obs["policy"] + noise
+                    # obs["policy"] = obs["policy"] + noise
                     action = policy(obs)
-                    # action = action + torch.randn_like(action) * args_cli.action_std
+                    action = action + torch.randn_like(action) * args_cli.action_std
 
                 obs, rew, dones, extras = env.step(action)
                 time_outs = extras.get("time_outs", torch.zeros_like(dones))
@@ -652,6 +652,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _save_run_manifest(output_dir, manifest)
     print(f"[INFO] Saved dataset to {dataset_file.resolve()}")
     print(f"[INFO] Total trajectories: {len(manifest['files'])}")
+    successful_trajectories = sum(float(traj_info.get("success", 0.0)) > 0.0 for traj_info in manifest["files"])
+    success_percentage = (100.0 * successful_trajectories / len(manifest["files"])) if manifest["files"] else 0.0
+    print(
+        f"[INFO] Successful trajectories: {successful_trajectories}/{len(manifest['files'])} "
+        f"({success_percentage:.2f}%)"
+    )
 
 
 if __name__ == "__main__":
