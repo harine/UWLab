@@ -1,19 +1,17 @@
 data_path: "data/peg_expert/trajectories/q_data_chunk_5_gamma_0.97.pt"
-output_dir: "l2sml/outputs/q_function_gamma_0.97"
-run_name: "q_function_gamma_0.97"
-
+output_dir: "l2sml/outputs/pi_base"
+run_name: "pi_base_chunked"
 seed: 0
-device: "cuda"
-
+device: "cuda:1"
 hidden_dims: [512, 256, 128, 64]
-epochs: 100
+epochs: 20
 batch_size: 256
 learning_rate: 0.001
 weight_decay: 0.0
 train_split: 0.9
 grad_clip_norm: 0.0
-
 num_workers: 0
 pin_memory: false
 log_every: 10
 save_every: 50
+max_files: 0

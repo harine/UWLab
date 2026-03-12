@@ -199,30 +199,7 @@ def _image_tensor_to_uint8_frame(value: torch.Tensor) -> np.ndarray:
     return frame
 
 
-def _compose_rendered_camera_frame(obs: dict[str, Any], env_idx: int) -> np.ndarray:
-    camera_obs = _tensordict_to_dict(obs.get("cameras"))
-    if not isinstance(camera_obs, dict):
-        raise RuntimeError(
-            "capture_rendered_images=True requires observations['cameras'] with front_rgb and side_rgb terms."
-        )
 
-    front_rgb = camera_obs.get("front_rgb")
-    side_rgb = camera_obs.get("side_rgb")
-    if not isinstance(front_rgb, torch.Tensor) or not isinstance(side_rgb, torch.Tensor):
-        available_keys = sorted(camera_obs.keys())
-        raise RuntimeError(
-            "capture_rendered_images=True requires camera observations 'front_rgb' and 'side_rgb'. "
-            f"Available camera keys: {available_keys}"
-        )
-
-    front_frame = _image_tensor_to_uint8_frame(front_rgb[env_idx])
-    side_frame = _image_tensor_to_uint8_frame(side_rgb[env_idx])
-    if front_frame.shape[0] != side_frame.shape[0]:
-        raise RuntimeError(
-            "Front and side camera heights must match to compose rendered video frames, "
-            f"got {front_frame.shape} and {side_frame.shape}."
-        )
-    return np.concatenate((front_frame, side_frame), axis=1)
 
 
 def _normalize_obs_dict(policy_obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -588,20 +565,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         collect_positions=args_cli.collect_positions,
                         position_terms_xyz=position_terms_xyz,
                     )
-                    for cam_key, cam_tensor in cameras_obs.items():
-                        if isinstance(cam_tensor, torch.Tensor) and _is_image_tensor(cam_tensor):
-                            trajectories[ei]["obs_images"].setdefault(cam_key, []).append(
-                                _to_cpu_detached(cam_tensor[env_idx : env_idx + 1])
-                            )
-                    # if args_cli.capture_rendered_images:
-                    #     rendered_frame = _compose_rendered_camera_frame(obs, ei)
-                    #     trajectories[ei]["rendered_images"].append(rendered_frame)
-                    #     trajectories[ei]["obs_images"].setdefault(args_cli.render_image_obs_key, []).append(
-                    #         torch.from_numpy(rendered_frame.copy()).unsqueeze(0)
-                    #     )
+                    if args_cli.capture_rendered_images and cameras_obs:
+                        for cam_key, cam_tensor in cameras_obs.items():
+                            if isinstance(cam_tensor, torch.Tensor) and _is_image_tensor(cam_tensor):
+                                trajectories[ei]["obs_images"].setdefault(cam_key, []).append(
+                                    _to_cpu_detached(cam_tensor[ei : ei + 1])
+                                )
 
                 with torch.inference_mode():
-                    action = policy(obs) # + noise
+                    action = policy(obs) + noise
                     # action = action + torch.randn_like(action) * args_cli.action_std
 
                 obs, rew, dones, extras = env.step(action)

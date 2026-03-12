@@ -10,7 +10,8 @@ import torch
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate Q-function training data with (state, action_chunk, return_to_go) "
+            "Generate Q-function training data with "
+            "(state, action_chunk, next_state, return_to_go) "
             "from saved expert trajectories."
         )
     )
@@ -101,20 +102,24 @@ def _build_samples_for_traj(
     rewards: torch.Tensor,
     chunk_size: int,
     gamma: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     steps = rewards.shape[0]
-    valid_steps = steps - chunk_size + 1
+    # Observations are recorded before each action is executed, so the state after
+    # an action chunk starting at time t is the observation at t + chunk_size.
+    valid_steps = steps - chunk_size
     if valid_steps <= 0:
         empty_state = obs_flat.new_empty((0, obs_flat.shape[1]))
         empty_action_chunks = actions.new_empty((0, chunk_size * actions.shape[1]))
+        empty_next_states = obs_flat.new_empty((0, obs_flat.shape[1]))
         empty_returns = rewards.new_empty((0,))
-        return empty_state, empty_action_chunks, empty_returns
+        return empty_state, empty_action_chunks, empty_next_states, empty_returns
 
     returns = _compute_return_to_go(rewards, gamma)
     states = obs_flat[:valid_steps]
-    action_chunks = actions.unfold(0, chunk_size, 1).reshape(valid_steps, -1)
+    action_chunks = actions.unfold(0, chunk_size, 1)[:valid_steps].reshape(valid_steps, -1)
+    next_states = obs_flat[chunk_size : chunk_size + valid_steps]
     returns_at_states = returns[:valid_steps]
-    return states, action_chunks, returns_at_states
+    return states, action_chunks, next_states, returns_at_states
 
 
 def main() -> None:
@@ -141,6 +146,7 @@ def main() -> None:
 
     states_all: list[torch.Tensor] = []
     action_chunks_all: list[torch.Tensor] = []
+    next_states_all: list[torch.Tensor] = []
     returns_all: list[torch.Tensor] = []
     used_files: list[str] = []
     skipped_too_short: list[str] = []
@@ -173,7 +179,7 @@ def main() -> None:
                 f"obs_flat={obs_flat.shape[0]}, actions={actions.shape[0]}, rewards={rewards.shape[0]}"
             )
 
-        states, action_chunks, returns = _build_samples_for_traj(
+        states, action_chunks, next_states, returns = _build_samples_for_traj(
             obs_flat=obs_flat,
             actions=actions,
             rewards=rewards,
@@ -186,6 +192,7 @@ def main() -> None:
 
         states_all.append(states)
         action_chunks_all.append(action_chunks)
+        next_states_all.append(next_states)
         returns_all.append(returns)
         used_files.append(str(traj_path))
 
@@ -196,11 +203,13 @@ def main() -> None:
 
     states_out = torch.cat(states_all, dim=0)
     action_chunks_out = torch.cat(action_chunks_all, dim=0)
+    next_states_out = torch.cat(next_states_all, dim=0)
     returns_out = torch.cat(returns_all, dim=0)
 
     output: dict[str, Any] = {
         "states": states_out,
         "action_chunks": action_chunks_out,
+        "next_states": next_states_out,
         "returns": returns_out,
         "meta": {
             "chunk_size": int(args.chunk_size),
@@ -208,6 +217,7 @@ def main() -> None:
             "num_source_files": len(used_files),
             "num_samples": int(states_out.shape[0]),
             "state_dim": int(states_out.shape[1]),
+            "next_state_dim": int(next_states_out.shape[1]),
             "action_chunk_dim": int(action_chunks_out.shape[1]),
             "source_files": used_files,
             "skipped_too_short": skipped_too_short,
@@ -224,6 +234,7 @@ def main() -> None:
         "[INFO] Output shapes: "
         f"states={tuple(states_out.shape)}, "
         f"action_chunks={tuple(action_chunks_out.shape)}, "
+        f"next_states={tuple(next_states_out.shape)}, "
         f"returns={tuple(returns_out.shape)}"
     )
     print(f"[INFO] Saved Q-data to: {output_path.resolve()}")

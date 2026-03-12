@@ -102,7 +102,7 @@ def main() -> None:
     batch_size = int(cfg.get("batch_size", 256))
     learning_rate = float(cfg.get("learning_rate", 1e-3))
     weight_decay = float(cfg.get("weight_decay", 0.0))
-    hidden_dim = int(cfg.get("hidden_dim", 256))
+    hidden_dims = int(cfg.get("hidden_dim", 256))
     epochs = int(cfg.get("epochs", 100))
     num_workers = int(cfg.get("num_workers", 0))
     pin_memory = bool(cfg.get("pin_memory", False))
@@ -156,8 +156,18 @@ def main() -> None:
     model = QFunction(
         state_dim=states.shape[1],
         action_chunk_dim=action_chunks.shape[1],
-        hidden_dim=hidden_dim,
+        hidden_dims=hidden_dims,
     ).to(device)
+
+    # train value function first
+    value_model = ValueFunction(
+        state_dim=states.shape[1],
+        hidden_dims=hidden_dims,
+    ).to(device)
+    value_optimizer = torch.optim.Adam(value_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+    value_criterion = nn.MSELoss()
+
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
@@ -200,7 +210,7 @@ def main() -> None:
                     "model_state_dict": model.state_dict(),
                     "state_dim": states.shape[1],
                     "action_chunk_dim": action_chunks.shape[1],
-                    "hidden_dim": hidden_dim,
+                    "hidden_dims": hidden_dims,
                     "best_val_loss": best_val,
                     "epoch": epoch,
                     "config": cfg,
@@ -215,7 +225,7 @@ def main() -> None:
                     "model_state_dict": model.state_dict(),
                     "state_dim": states.shape[1],
                     "action_chunk_dim": action_chunks.shape[1],
-                    "hidden_dim": hidden_dim,
+                    "hidden_dims": hidden_dims,
                     "epoch": epoch,
                     "train_loss": train_loss,
                     "val_loss": val_loss,
@@ -235,7 +245,7 @@ def main() -> None:
             "model_state_dict": model.state_dict(),
             "state_dim": states.shape[1],
             "action_chunk_dim": action_chunks.shape[1],
-            "hidden_dim": hidden_dim,
+            "hidden_dims": hidden_dims,
             "epoch": epochs,
             "best_val_loss": best_val,
             "config": cfg,
