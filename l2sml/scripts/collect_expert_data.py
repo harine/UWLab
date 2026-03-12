@@ -144,6 +144,7 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import numpy as np
 import torch
+from tensordict import TensorDict
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -435,9 +436,9 @@ def _finalize_trajectory(traj: dict[str, Any], success: float | None = None) -> 
         key: torch.cat(values, dim=0) if values else torch.empty(0) for key, values in traj["obs_other_state"].items()
     }
     if traj["rendered_images"]:
-        out["rendered_images"] = np.stack(traj["rendered_images"], axis=0)
+        out["rendered_images"] = torch.from_numpy(np.stack(traj["rendered_images"], axis=0))
     else:
-        out["rendered_images"] = np.empty((0,), dtype=np.uint8)
+        out["rendered_images"] = torch.empty((0,), dtype=torch.uint8)
     if "ee_positions" in traj:
         out["ee_positions"] = torch.cat(traj["ee_positions"], dim=0) if traj["ee_positions"] else torch.empty((0, 3))
         out["insertive_positions"] = (
@@ -447,26 +448,52 @@ def _finalize_trajectory(traj: dict[str, Any], success: float | None = None) -> 
             torch.cat(traj["receptive_positions"], dim=0) if traj["receptive_positions"] else torch.empty((0, 3))
         )
     if success is not None:
-        out["success"] = float(success)
+        out["success"] = torch.tensor(success, dtype=torch.float32)
     return out
+
+
+def _to_nested_tensordict(data: dict[str, Any]) -> TensorDict:
+    converted: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            converted[key] = _to_nested_tensordict(value)
+        elif isinstance(value, torch.Tensor):
+            converted[key] = value
+        elif isinstance(value, np.ndarray):
+            converted[key] = torch.from_numpy(value)
+        elif isinstance(value, (float, int, bool)):
+            converted[key] = torch.tensor(value)
+        else:
+            raise TypeError(f"Unsupported value type for TensorDict conversion at key '{key}': {type(value)}")
+    return TensorDict(converted, batch_size=[])
+
+
+def _trajectory_key(traj_idx: int) -> str:
+    return f"traj_{traj_idx:06d}"
+
+
+def _save_trajectory_dataset(dataset: dict[str, TensorDict], dataset_file: Path) -> None:
+    torch.save(TensorDict(dataset, batch_size=[]), dataset_file)
 
 
 def _save_trajectory(
     traj: dict[str, Any],
     traj_idx: int,
-    traj_dir: Path,
+    dataset: dict[str, TensorDict],
+    dataset_file: Path,
     output_dir: Path,
     manifest: dict[str, Any],
     done: bool,
     success: float,
 ) -> None:
     serialized = _finalize_trajectory(traj, success=success)
-    traj_file = traj_dir / f"traj_{traj_idx:06d}.pt"
-    torch.save(serialized, traj_file)
+    traj_key = _trajectory_key(traj_idx)
+    dataset[traj_key] = _to_nested_tensordict(serialized)
     manifest["files"].append(
         {
             "trajectory_id": traj_idx,
-            "file": str(traj_file.relative_to(output_dir)),
+            "key": traj_key,
+            "file": str(dataset_file.relative_to(output_dir)),
             "steps": int(serialized["actions"].shape[0]),
             "done": done,
             "success": success,
@@ -491,8 +518,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = args_cli.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     output_dir = Path(args_cli.output_dir)
-    traj_dir = output_dir / "trajectories"
-    traj_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_file = output_dir / "trajectories.pt"
 
     gym_env = _make_env_from_cfg(
         env_cfg,
@@ -523,6 +550,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "task": args_cli.task,
         "expert_checkpoint": str(Path(args_cli.checkpoint).resolve()),
         "output_dir": str(output_dir.resolve()),
+        "dataset_file": str(dataset_file.relative_to(output_dir)),
         "num_trajectories": args_cli.num_trajectories,
         "horizon": args_cli.horizon,
         "num_envs": num_envs,
@@ -535,6 +563,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     trajectories: list[dict[str, Any]] = [
         _trajectory_template(collect_positions=args_cli.collect_positions) for _ in range(num_envs)
     ]
+    saved_trajectories: dict[str, TensorDict] = {}
     step_counts = [0] * num_envs
 
     try:
@@ -604,7 +633,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             traj_rew = torch.cat(trajectories[ei]["rewards"], dim=0)
                             success_val = float(get_successes_approx(traj_rew).any().item())
                         _save_trajectory(
-                            trajectories[ei], collected, traj_dir, output_dir, manifest, env_done, success_val,
+                            trajectories[ei], collected, saved_trajectories, dataset_file, output_dir, manifest, env_done, success_val,
                         )
                         collected += 1
                         pbar.update(1)
@@ -612,14 +641,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         step_counts[ei] = 0
 
                         if collected % args_cli.save_every == 0 or collected == target:
+                            _save_trajectory_dataset(saved_trajectories, dataset_file)
                             _save_run_manifest(output_dir, manifest)
                             print(f"[INFO] Collected {collected}/{target} trajectories.")
 
     finally:
         env.close()
 
+    _save_trajectory_dataset(saved_trajectories, dataset_file)
     _save_run_manifest(output_dir, manifest)
-    print(f"[INFO] Saved dataset to {output_dir.resolve()}")
+    print(f"[INFO] Saved dataset to {dataset_file.resolve()}")
     print(f"[INFO] Total trajectories: {len(manifest['files'])}")
 
 
