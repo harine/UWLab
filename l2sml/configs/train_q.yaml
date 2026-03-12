@@ -3,17 +3,24 @@ output_dir: "l2sml/outputs/q_function_gamma_0.97"
 run_name: "q_function_gamma_0.97"
 
 seed: 0
-device: "cuda"
+device: "cuda:1"
 
 hidden_dims: [512, 256, 128, 64]
-epochs: 100
+value_checkpoint: null
+use_wandb: true
+wandb_project: "uwlab-q-function"
+wandb_name: null
+wandb_group: null
+wandb_entity: null
+wandb_tags: null
+epochs: 20
 batch_size: 256
 learning_rate: 0.001
 weight_decay: 0.0
 train_split: 0.9
 grad_clip_norm: 0.0
 
-num_workers: 0
-pin_memory: false
+num_workers: 8
+pin_memory: true
 log_every: 10
 save_every: 50

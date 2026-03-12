@@ -539,7 +539,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     try:
         obs = _tensordict_to_dict(env.get_observations())
-        noise = torch.randn((num_envs,env.num_actions), device=env.device)
+        noise = torch.randn(obs["policy"].shape, device=env.device) * args_cli.action_std
         with tqdm(total=target, desc="Collecting trajectories") as pbar:
             while collected < target:
                 obs_flat = obs["policy"]
@@ -573,7 +573,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 )
 
                 with torch.inference_mode():
-                    action = policy(obs) + noise
+                    obs["policy"] = obs["policy"] + noise
+                    action = policy(obs)
                     # action = action + torch.randn_like(action) * args_cli.action_std
 
                 obs, rew, dones, extras = env.step(action)

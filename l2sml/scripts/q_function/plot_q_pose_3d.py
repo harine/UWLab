@@ -131,14 +131,14 @@ def _load_q_model(checkpoint_path: Path, device: torch.device) -> tuple[QFunctio
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict):
         raise ValueError(f"Expected checkpoint dict at {checkpoint_path}, got {type(checkpoint)}.")
-    for key in ("model_state_dict", "state_dim", "action_chunk_dim", "hidden_dim"):
+    for key in ("model_state_dict", "state_dim", "action_chunk_dim", "hidden_dims"):
         if key not in checkpoint:
             raise KeyError(f"Checkpoint missing required key '{key}': {checkpoint_path}")
 
     model = QFunction(
         state_dim=int(checkpoint["state_dim"]),
         action_chunk_dim=int(checkpoint["action_chunk_dim"]),
-        hidden_dim=int(checkpoint["hidden_dim"]),
+        hidden_dims=checkpoint["hidden_dims"],
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)

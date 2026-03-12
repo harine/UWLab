@@ -5,7 +5,7 @@ checkpoint: "l2sml/outputs/pi_base/pi_base_chunked_best.pt"
 output_dir: "data/eval_policy"
 num_rollouts: 50
 horizon: 800
-num_envs: 1
+num_envs: 64
 seed: 0
 headless: true
 capture_rendered_images: true
