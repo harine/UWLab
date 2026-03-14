@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,10 @@ def _parse_args() -> argparse.Namespace:
         "--trajectory_path",
         type=str,
         required=True,
-        help="Path to a single trajectory .pt file, or a directory containing traj_*.pt files.",
+        help=(
+            "Path to a single trajectory .pt file, a monolithic trajectories.pt dataset file, "
+            "or a directory containing trajectories.pt / traj_*.pt files."
+        ),
     )
     parser.add_argument(
         "--chunk_size",
@@ -55,25 +59,54 @@ def _resolve_trajectory_files(trajectory_path: Path) -> list[Path]:
         return [trajectory_path]
 
     if trajectory_path.is_dir():
+        monolithic_file = trajectory_path / "trajectories.pt"
+        if monolithic_file.is_file():
+            return [monolithic_file]
         traj_files = sorted(trajectory_path.glob("traj_*.pt"))
         if not traj_files:
-            raise FileNotFoundError(f"No trajectory files matching traj_*.pt found under {trajectory_path}")
+            raise FileNotFoundError(
+                f"No trajectory files matching trajectories.pt or traj_*.pt found under {trajectory_path}"
+            )
         return traj_files
 
     raise FileNotFoundError(f"Trajectory path does not exist: {trajectory_path}")
 
 
-def _load_traj(path: Path) -> dict[str, Any]:
+def _is_mapping_like(value: Any) -> bool:
+    return hasattr(value, "keys") and hasattr(value, "__getitem__")
+
+
+def _is_trajectory_record(data: Any) -> bool:
+    if not _is_mapping_like(data):
+        return False
+    keys = set(data.keys())
+    return {"obs_flat", "actions", "rewards"}.issubset(keys)
+
+
+def _iter_trajectory_entries(path: Path) -> Iterable[tuple[str, Any]]:
     data = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(data, dict):
-        raise ValueError(f"Trajectory at {path} is not a dict.")
-    for key in ("obs_flat", "actions", "rewards"):
-        if key not in data:
-            raise KeyError(f"Trajectory at {path} is missing required key: {key}")
-    return data
+    if _is_trajectory_record(data):
+        yield str(path), data
+        return
+
+    if _is_mapping_like(data):
+        traj_keys = [key for key in sorted(data.keys(), key=str) if str(key).startswith("traj_")]
+        if traj_keys:
+            for traj_key in traj_keys:
+                traj_data = data[traj_key]
+                if not _is_trajectory_record(traj_data):
+                    raise KeyError(
+                        f"Trajectory entry {traj_key!r} in {path} is missing one of: obs_flat, actions, rewards"
+                    )
+                yield f"{path}::{traj_key}", traj_data
+            return
+
+    raise ValueError(
+        f"Trajectory data at {path} must be either a single trajectory record or a mapping of traj_* entries."
+    )
 
 
-def _ensure_2d_time_major(tensor: torch.Tensor, name: str, traj_path: Path) -> torch.Tensor:
+def _ensure_2d_time_major(tensor: torch.Tensor, name: str, traj_path: str | Path) -> torch.Tensor:
     if tensor.ndim == 0:
         raise ValueError(f"{name} in {traj_path} must have a time dimension, got scalar.")
     if tensor.ndim == 1:
@@ -81,7 +114,7 @@ def _ensure_2d_time_major(tensor: torch.Tensor, name: str, traj_path: Path) -> t
     return tensor.reshape(tensor.shape[0], -1).to(dtype=torch.float32)
 
 
-def _ensure_1d_time(tensor: torch.Tensor, name: str, traj_path: Path) -> torch.Tensor:
+def _ensure_1d_time(tensor: torch.Tensor, name: str, traj_path: str | Path) -> torch.Tensor:
     if tensor.ndim == 0:
         raise ValueError(f"{name} in {traj_path} must have a time dimension, got scalar.")
     return tensor.reshape(tensor.shape[0], -1)[:, 0].to(dtype=torch.float32)
@@ -130,9 +163,12 @@ def main() -> None:
     gamma = args.gamma
     input_path = Path(args.trajectory_path)
     traj_files = _resolve_trajectory_files(input_path)
+    traj_entries: list[tuple[str, Any]] = []
+    for traj_file in traj_files:
+        traj_entries.extend(_iter_trajectory_entries(traj_file))
     if args.max_trajs > 0:
-        traj_files = traj_files[: args.max_trajs]
-    if not traj_files:
+        traj_entries = traj_entries[: args.max_trajs]
+    if not traj_entries:
         raise FileNotFoundError("No trajectory files selected after applying max_trajs.")
 
     if args.output_path is None:
@@ -148,12 +184,11 @@ def main() -> None:
     action_chunks_all: list[torch.Tensor] = []
     next_states_all: list[torch.Tensor] = []
     returns_all: list[torch.Tensor] = []
-    used_files: list[str] = []
+    used_sources: list[str] = []
     skipped_too_short: list[str] = []
     skipped_empty: list[str] = []
 
-    for traj_path in traj_files:
-        data = _load_traj(traj_path)
+    for traj_source, data in traj_entries:
         obs_flat_raw = data["obs_flat"]
         actions_raw = data["actions"]
         rewards_raw = data["rewards"]
@@ -165,17 +200,17 @@ def main() -> None:
         if not isinstance(rewards_raw, torch.Tensor):
             rewards_raw = torch.as_tensor(rewards_raw)
 
-        obs_flat = _ensure_2d_time_major(obs_flat_raw, "obs_flat", traj_path)
-        actions = _ensure_2d_time_major(actions_raw, "actions", traj_path)
-        rewards = _ensure_1d_time(rewards_raw, "rewards", traj_path)
+        obs_flat = _ensure_2d_time_major(obs_flat_raw, "obs_flat", traj_source)
+        actions = _ensure_2d_time_major(actions_raw, "actions", traj_source)
+        rewards = _ensure_1d_time(rewards_raw, "rewards", traj_source)
 
         if obs_flat.shape[0] == 0 or actions.shape[0] == 0 or rewards.shape[0] == 0:
-            skipped_empty.append(str(traj_path))
+            skipped_empty.append(traj_source)
             continue
 
         if not (obs_flat.shape[0] == actions.shape[0] == rewards.shape[0]):
             raise ValueError(
-                f"Time dimension mismatch in {traj_path}: "
+                f"Time dimension mismatch in {traj_source}: "
                 f"obs_flat={obs_flat.shape[0]}, actions={actions.shape[0]}, rewards={rewards.shape[0]}"
             )
 
@@ -187,14 +222,14 @@ def main() -> None:
             gamma=gamma,
         )
         if states.shape[0] == 0:
-            skipped_too_short.append(str(traj_path))
+            skipped_too_short.append(traj_source)
             continue
 
         states_all.append(states)
         action_chunks_all.append(action_chunks)
         next_states_all.append(next_states)
         returns_all.append(returns)
-        used_files.append(str(traj_path))
+        used_sources.append(traj_source)
 
     if not states_all:
         raise RuntimeError(
@@ -214,12 +249,13 @@ def main() -> None:
         "meta": {
             "chunk_size": int(args.chunk_size),
             "gamma": float(gamma),
-            "num_source_files": len(used_files),
+            "num_input_files": len(traj_files),
+            "num_source_entries": len(used_sources),
             "num_samples": int(states_out.shape[0]),
             "state_dim": int(states_out.shape[1]),
             "next_state_dim": int(next_states_out.shape[1]),
             "action_chunk_dim": int(action_chunks_out.shape[1]),
-            "source_files": used_files,
+            "source_files": used_sources,
             "skipped_too_short": skipped_too_short,
             "skipped_empty": skipped_empty,
         },
@@ -227,7 +263,8 @@ def main() -> None:
     torch.save(output, output_path)
 
     print(f"[INFO] Read trajectory files: {len(traj_files)}")
-    print(f"[INFO] Used trajectory files: {len(used_files)}")
+    print(f"[INFO] Expanded trajectory entries: {len(traj_entries)}")
+    print(f"[INFO] Used trajectory entries: {len(used_sources)}")
     print(f"[INFO] Skipped too short: {len(skipped_too_short)}")
     print(f"[INFO] Skipped empty: {len(skipped_empty)}")
     print(

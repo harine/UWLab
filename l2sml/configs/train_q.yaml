@@ -1,6 +1,6 @@
-data_path: "data/peg_expert/trajectories/q_data_chunk_5_gamma_0.97.pt"
-output_dir: "l2sml/outputs/q_function_gamma_0.97"
-run_name: "q_function_gamma_0.97"
+data_path: "data/peg_expert_q_function_std4/trajectories_q_data_chunk_5_gamma_0.97.pt"
+output_dir: "l2sml/outputs/q_function_gamma_0.97_ret_std4"
+run_name: "q_function_gamma_0.97_std4"
 
 seed: 0
 device: "cuda:1"
@@ -13,7 +13,7 @@ wandb_name: null
 wandb_group: null
 wandb_entity: null
 wandb_tags: null
-epochs: 20
+epochs: 100
 batch_size: 256
 learning_rate: 0.001
 weight_decay: 0.0

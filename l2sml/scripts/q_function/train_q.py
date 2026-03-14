@@ -184,13 +184,13 @@ def _evaluate_q(
     total_loss = 0.0
     total_samples = 0
     with torch.inference_mode():
-        for states, action_chunks, next_states in data_loader:
+        for states, action_chunks, returns in data_loader:
             states = states.to(device)
             action_chunks = action_chunks.to(device)
-            next_states = next_states.to(device)
-            advantages = value_model(next_states) - value_model(states)
+            returns = returns.to(device)
+            # advantages = value_model(next_states) - value_model(states)
             pred_advantages = model(states, action_chunks)
-            loss = criterion(pred_advantages, advantages)
+            loss = criterion(pred_advantages, returns)
             batch_size = states.shape[0]
             total_loss += float(loss.item()) * batch_size
             total_samples += batch_size
@@ -327,130 +327,130 @@ def main() -> None:
     value_last_model_path = output_dir / f"{run_name}_value_last.pt"
 
     loaded_value_checkpoint_path: str | None = None
-    if value_checkpoint_cfg:
-        value_checkpoint_path = Path(str(value_checkpoint_cfg))
-        value_model, value_checkpoint = _load_value_checkpoint(value_checkpoint_path, device=device)
-        if int(value_checkpoint["state_dim"]) != states.shape[1]:
-            raise ValueError(
-                "Value checkpoint state_dim does not match dataset state_dim: "
-                f"{value_checkpoint['state_dim']} != {states.shape[1]}"
-            )
-        value_hidden_dims = _parse_hidden_dims(value_checkpoint["hidden_dims"], key_name="checkpoint.hidden_dims")
-        value_best_val = float(value_checkpoint.get("best_val_loss", float("nan")))
-        loaded_value_checkpoint_path = str(value_checkpoint_path)
-        print(f"[INFO] Stage 1/2: loaded value checkpoint from {value_checkpoint_path}. Skipping value training.")
-        if wandb_run is not None:
-            wandb_run.log(
-                {
-                    "value/loaded_checkpoint": 1,
-                    "value/best_val_loss": value_best_val,
-                },
-                step=0,
-            )
-        wandb_step_offset = 0
-    else:
-        print("[INFO] Stage 1/2: training value function on state -> return targets.")
-        for epoch in range(1, value_epochs + 1):
-            value_model.train()
-            total_loss = 0.0
-            total_samples = 0
+    # if value_checkpoint_cfg:
+    #     value_checkpoint_path = Path(str(value_checkpoint_cfg))
+    #     value_model, value_checkpoint = _load_value_checkpoint(value_checkpoint_path, device=device)
+    #     if int(value_checkpoint["state_dim"]) != states.shape[1]:
+    #         raise ValueError(
+    #             "Value checkpoint state_dim does not match dataset state_dim: "
+    #             f"{value_checkpoint['state_dim']} != {states.shape[1]}"
+    #         )
+    #     value_hidden_dims = _parse_hidden_dims(value_checkpoint["hidden_dims"], key_name="checkpoint.hidden_dims")
+    #     value_best_val = float(value_checkpoint.get("best_val_loss", float("nan")))
+    #     loaded_value_checkpoint_path = str(value_checkpoint_path)
+    #     print(f"[INFO] Stage 1/2: loaded value checkpoint from {value_checkpoint_path}. Skipping value training.")
+    #     if wandb_run is not None:
+    #         wandb_run.log(
+    #             {
+    #                 "value/loaded_checkpoint": 1,
+    #                 "value/best_val_loss": value_best_val,
+    #             },
+    #             step=0,
+    #         )
+    #     wandb_step_offset = 0
+    # else:
+    #     print("[INFO] Stage 1/2: training value function on state -> return targets.")
+    #     for epoch in range(1, value_epochs + 1):
+    #         value_model.train()
+    #         total_loss = 0.0
+    #         total_samples = 0
 
-            for batch_states, _batch_action_chunks, _batch_next_states, batch_returns in train_loader:
-                batch_states = batch_states.to(device)
-                batch_returns = batch_returns.to(device)
+    #         for batch_states, _batch_action_chunks, _batch_next_states, batch_returns in train_loader:
+    #             batch_states = batch_states.to(device)
+    #             batch_returns = batch_returns.to(device)
 
-                pred_values = value_model(batch_states)
-                loss = value_criterion(pred_values, batch_returns)
+    #             pred_values = value_model(batch_states)
+    #             loss = value_criterion(pred_values, batch_returns)
 
-                value_optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                if grad_clip_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(value_model.parameters(), max_norm=grad_clip_norm)
-                value_optimizer.step()
+    #             value_optimizer.zero_grad(set_to_none=True)
+    #             loss.backward()
+    #             if grad_clip_norm > 0:
+    #                 torch.nn.utils.clip_grad_norm_(value_model.parameters(), max_norm=grad_clip_norm)
+    #             value_optimizer.step()
 
-                batch_size_actual = batch_states.shape[0]
-                total_loss += float(loss.item()) * batch_size_actual
-                total_samples += batch_size_actual
+    #             batch_size_actual = batch_states.shape[0]
+    #             total_loss += float(loss.item()) * batch_size_actual
+    #             total_samples += batch_size_actual
 
-            train_loss = total_loss / total_samples
-            val_loss = _evaluate_value(value_model, val_loader, value_criterion, device)
-            history["value_train_loss"].append(train_loss)
-            history["value_val_loss"].append(val_loss)
+    #         train_loss = total_loss / total_samples
+    #         val_loss = _evaluate_value(value_model, val_loader, value_criterion, device)
+    #         history["value_train_loss"].append(train_loss)
+    #         history["value_val_loss"].append(val_loss)
 
-            if val_loss < value_best_val:
-                value_best_val = val_loss
-                torch.save(
-                    {
-                        "model_state_dict": value_model.state_dict(),
-                        "state_dim": states.shape[1],
-                        "hidden_dims": value_hidden_dims,
-                        "best_val_loss": value_best_val,
-                        "epoch": epoch,
-                        "target_type": "return_to_go",
-                        "config": cfg,
-                    },
-                    value_best_model_path,
-                )
+    #         if val_loss < value_best_val:
+    #             value_best_val = val_loss
+    #             torch.save(
+    #                 {
+    #                     "model_state_dict": value_model.state_dict(),
+    #                     "state_dim": states.shape[1],
+    #                     "hidden_dims": value_hidden_dims,
+    #                     "best_val_loss": value_best_val,
+    #                     "epoch": epoch,
+    #                     "target_type": "return_to_go",
+    #                     "config": cfg,
+    #                 },
+    #                 value_best_model_path,
+    #             )
 
-            if epoch % save_every == 0:
-                ckpt_path = output_dir / f"{run_name}_value_epoch_{epoch:04d}.pt"
-                torch.save(
-                    {
-                        "model_state_dict": value_model.state_dict(),
-                        "state_dim": states.shape[1],
-                        "hidden_dims": value_hidden_dims,
-                        "epoch": epoch,
-                        "train_loss": train_loss,
-                        "val_loss": val_loss,
-                        "target_type": "return_to_go",
-                        "config": cfg,
-                    },
-                    ckpt_path,
-                )
+    #         if epoch % save_every == 0:
+    #             ckpt_path = output_dir / f"{run_name}_value_epoch_{epoch:04d}.pt"
+    #             torch.save(
+    #                 {
+    #                     "model_state_dict": value_model.state_dict(),
+    #                     "state_dim": states.shape[1],
+    #                     "hidden_dims": value_hidden_dims,
+    #                     "epoch": epoch,
+    #                     "train_loss": train_loss,
+    #                     "val_loss": val_loss,
+    #                     "target_type": "return_to_go",
+    #                     "config": cfg,
+    #                 },
+    #                 ckpt_path,
+    #             )
 
-            if epoch % log_every == 0 or epoch == 1 or epoch == value_epochs:
-                print(
-                    f"[VALUE] Epoch {epoch:04d}/{value_epochs} "
-                    f"train_loss={train_loss:.6f} val_loss={val_loss:.6f}"
-                )
-            if wandb_run is not None:
-                wandb_run.log(
-                    {
-                        "value/epoch": epoch,
-                        "value/train_loss": train_loss,
-                        "value/val_loss": val_loss,
-                        "value/best_val_loss": value_best_val,
-                    },
-                    step=epoch,
-                )
-        wandb_step_offset = value_epochs
+    #         if epoch % log_every == 0 or epoch == 1 or epoch == value_epochs:
+    #             print(
+    #                 f"[VALUE] Epoch {epoch:04d}/{value_epochs} "
+    #                 f"train_loss={train_loss:.6f} val_loss={val_loss:.6f}"
+    #             )
+    #         if wandb_run is not None:
+    #             wandb_run.log(
+    #                 {
+    #                     "value/epoch": epoch,
+    #                     "value/train_loss": train_loss,
+    #                     "value/val_loss": val_loss,
+    #                     "value/best_val_loss": value_best_val,
+    #                 },
+    #                 step=epoch,
+    #             )
+    #     wandb_step_offset = value_epochs
 
-        torch.save(
-            {
-                "model_state_dict": value_model.state_dict(),
-                "state_dim": states.shape[1],
-                "hidden_dims": value_hidden_dims,
-                "epoch": value_epochs,
-                "best_val_loss": value_best_val,
-                "target_type": "return_to_go",
-                "config": cfg,
-            },
-            value_last_model_path,
-        )
+    #     torch.save(
+    #         {
+    #             "model_state_dict": value_model.state_dict(),
+    #             "state_dim": states.shape[1],
+    #             "hidden_dims": value_hidden_dims,
+    #             "epoch": value_epochs,
+    #             "best_val_loss": value_best_val,
+    #             "target_type": "return_to_go",
+    #             "config": cfg,
+    #         },
+    #         value_last_model_path,
+    #     )
 
-        value_model, _ = _load_value_checkpoint(value_best_model_path, device=device)
-        loaded_value_checkpoint_path = str(value_best_model_path)
-        print(f"[INFO] Reloaded best value checkpoint for Q training: {value_best_model_path}")
-        if wandb_run is not None:
-            wandb_run.log(
-                {
-                    "value/reloaded_best_checkpoint": 1,
-                    "value/best_val_loss": value_best_val,
-                },
-                step=value_epochs,
-            )
+    #     value_model, _ = _load_value_checkpoint(value_best_model_path, device=device)
+    #     loaded_value_checkpoint_path = str(value_best_model_path)
+    #     print(f"[INFO] Reloaded best value checkpoint for Q training: {value_best_model_path}")
+        # if wandb_run is not None:
+        #     wandb_run.log(
+        #         {
+        #             "value/reloaded_best_checkpoint": 1,
+        #             "value/best_val_loss": value_best_val,
+        #         },
+        #         step=value_epochs,
+        #     )
 
-    q_dataset = TensorDataset(states, action_chunks, next_states)
+    q_dataset = TensorDataset(states, action_chunks, returns)
     q_train_dataset = Subset(q_dataset, train_dataset.indices)
     q_val_dataset = Subset(q_dataset, val_dataset.indices)
 
@@ -491,14 +491,14 @@ def main() -> None:
         total_loss = 0.0
         total_samples = 0
 
-        for batch_states, batch_action_chunks, batch_next_states in q_train_loader:
+        for batch_states, batch_action_chunks, batch_returns in q_train_loader:
             batch_states = batch_states.to(device)
             batch_action_chunks = batch_action_chunks.to(device)
-            batch_next_states = batch_next_states.to(device)
-            batch_target_values = value_model(batch_next_states) - value_model(batch_states)
+            batch_returns = batch_returns.to(device)
+            # batch_target_values = value_model(batch_next_states) - value_model(batch_states)
 
             pred_values = q_model(batch_states, batch_action_chunks)
-            loss = q_criterion(pred_values, batch_target_values)
+            loss = q_criterion(pred_values, batch_returns)
 
             q_optimizer.zero_grad(set_to_none=True)
             loss.backward()

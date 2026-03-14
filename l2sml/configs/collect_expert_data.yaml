@@ -1,7 +1,7 @@
 task: "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-DataCollection-v0"
 agent: "rsl_rl_cfg_entry_point"
 checkpoint: "expert_policies/peg_state_rl_expert.pt"
-output_dir: "data/peg_expert_q_function"
+output_dir: "data/peg_expert_q_function_std4"
 num_trajectories: 10000
 horizon: 800
 num_envs: 2048
@@ -12,7 +12,7 @@ headless: true
 capture_rendered_images: false
 collect_positions: false
 render_image_obs_key: "render_rgb"
-action_std: 0.3
+action_std: 4.0
 proprio_keys:
   - "prev_actions"
   - "joint_pos"
