@@ -1,0 +1,32 @@
+task: "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-DataCollection-v0"
+agent: "rsl_rl_cfg_entry_point"
+checkpoint: "expert_policies/peg_state_rl_expert.pt"
+output_dir: "data/peg_policy_10000"
+num_trajectories: 10000
+horizon: 200
+num_envs: 2048
+seed: 0
+save_every: 10000
+disable_fabric: false
+headless: true
+capture_rendered_images: false
+collect_positions: false
+render_image_obs_key: "render_rgb"
+action_std: 0.0
+only_success: true
+proprio_keys:
+  - "prev_actions"
+  - "joint_pos"
+  - "end_effector_pose"
+asset_keys:
+  - "insertive_asset_pose"
+  - "receptive_asset_pose"
+  - "insertive_asset_in_receptive_asset_frame"
+image_keys: []
+required_obs_keys:
+  - "prev_actions"
+  - "joint_pos"
+  - "end_effector_pose"
+  - "insertive_asset_pose"
+  - "receptive_asset_pose"
+  - "insertive_asset_in_receptive_asset_frame"
