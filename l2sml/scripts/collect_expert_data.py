@@ -117,6 +117,12 @@ def _build_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
         default=bool(config.get("exact_success", False)),
         help="If true, use get_successes(env); otherwise use get_successes_approx(rewards).",
     )
+    parser.add_argument(
+        "--only_success",
+        action=argparse.BooleanOptionalAction,
+        default=bool(config.get("only_success", False)),
+        help="Only collect successful trajectories.",
+    )
     cli_args.add_rsl_rl_args(parser)
     parser.set_defaults(checkpoint=config.get("checkpoint", config.get("expert_checkpoint", "peg_state_rl_expert.pt")))
     AppLauncher.add_app_launcher_args(parser)
@@ -505,6 +511,9 @@ def get_successes(env: RslRlVecEnvWrapper) -> torch.Tensor:
     for i in range(env.num_envs):
         successes[i] = env.unwrapped.reward_manager.get_active_iterable_terms(i)[7][1][0]
     return successes
+def get_success(env: RslRlVecEnvWrapper, env_idx: int) -> float:
+    return env.unwrapped.reward_manager.get_active_iterable_terms(env_idx)[7][1][0] > 0.5
+
 
 def get_successes_approx(rew: torch.Tensor) -> torch.Tensor:
     return torch.where(rew > 0.05, 1.0, 0.0)
@@ -627,16 +636,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
                     if env_done or horizon_hit:
                         if args_cli.exact_success:
-                            success_tensor = get_successes(env)
-                            success_val = float(success_tensor[ei].item())
+                            success_val = get_success(env, ei)
                         else:
                             traj_rew = torch.cat(trajectories[ei]["rewards"], dim=0)
                             success_val = float(get_successes_approx(traj_rew).any().item())
-                        _save_trajectory(
-                            trajectories[ei], collected, saved_trajectories, dataset_file, output_dir, manifest, env_done, success_val,
-                        )
-                        collected += 1
-                        pbar.update(1)
+                        if not args_cli.only_success or success_val:
+                            _save_trajectory(
+                                trajectories[ei], collected, saved_trajectories, dataset_file, output_dir, manifest, env_done, success_val,
+                            )
+                            collected += 1
+                            pbar.update(1)
                         trajectories[ei] = _trajectory_template(collect_positions=args_cli.collect_positions)
                         step_counts[ei] = 0
 

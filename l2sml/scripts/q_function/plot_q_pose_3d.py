@@ -556,6 +556,7 @@ def _overlay_q_values_on_video(
     margin = 12
     panel_h = 78
     bar_h = 16
+    status_font_scale = 0.55
 
     output_frames: list[np.ndarray] = []
     for idx, frame in enumerate(safe_frames):
@@ -576,8 +577,23 @@ def _overlay_q_values_on_video(
             label = "Q(current chunk): N/A"
         status_text = f"Status: {status_label}"
         range_text = f"Scale [{q_min:.3f}, {q_max:.3f}]"
+        status_text_size, status_baseline = cv2.getTextSize(status_text, font, status_font_scale, 1)
+        status_x0 = margin - 6
+        status_y0 = margin - 6
+        status_x1 = status_x0 + status_text_size[0] + 12
+        status_y1 = status_y0 + status_text_size[1] + status_baseline + 12
+        cv2.rectangle(overlay, (status_x0, status_y0), (status_x1, status_y1), (24, 24, 24), -1)
+        cv2.putText(
+            overlay,
+            status_text,
+            (margin, status_y1 - status_baseline - 6),
+            font,
+            status_font_scale,
+            (220, 220, 220),
+            1,
+            cv2.LINE_AA,
+        )
         cv2.putText(overlay, label, (margin, h + 28), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
-        cv2.putText(overlay, status_text, (margin, h + 56), font, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
 
         text_size, _ = cv2.getTextSize(range_text, font, 0.5, 1)
         cv2.putText(

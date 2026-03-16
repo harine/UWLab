@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-"""Evaluate a checkpointed policy: save positions and camera videos, then plot trajectories and success rate."""
+from pi_base.models import DeterministicPolicy
+from q_function.models import QFunction
+
+"""Collect expert trajectories from a checkpointed policy."""
 
 import argparse
 import copy
@@ -10,18 +13,10 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import numpy as np
-import torch
-import yaml
-from isaaclab.app import AppLauncher
 from tqdm import tqdm
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-L2SML_DIR = SCRIPT_DIR.parent  # l2sml/
-DEFAULT_CONFIG_PATH = L2SML_DIR / "configs" / "eval_policy.yaml"
-Q_FUNCTION_DIR = SCRIPT_DIR / "q_function"
-MODELS_PATH = Q_FUNCTION_DIR / "models.py"
+import yaml
+from isaaclab.app import AppLauncher
 
 _RSL_RL_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts" / "reinforcement_learning" / "rsl_rl"
 if str(_RSL_RL_SCRIPTS_DIR) not in sys.path:
@@ -29,28 +24,7 @@ if str(_RSL_RL_SCRIPTS_DIR) not in sys.path:
 import cli_args  # noqa: E402
 
 
-def _load_gaussian_policy_module():
-    import importlib.util
-    if not MODELS_PATH.exists():
-        raise FileNotFoundError(f"GaussianPolicy models not found at {MODELS_PATH}")
-    spec = importlib.util.spec_from_file_location("q_function_models", MODELS_PATH)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to load models module from {MODELS_PATH}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.GaussianPolicy
-
-
-def _load_yaml_config(path: str | Path) -> dict[str, Any]:
-    path = Path(path)
-    if not path.is_absolute():
-        # Try cwd first, then relative to l2sml dir
-        if not path.exists():
-            alt = L2SML_DIR / path
-            if alt.exists():
-                path = alt
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {path}")
+def _load_yaml_config(path: str) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
@@ -59,100 +33,135 @@ def _load_yaml_config(path: str | Path) -> dict[str, Any]:
 
 
 def _build_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Evaluate a policy: rollouts (no noise), save positions and videos, plot trajectories and success.")
+    parser = argparse.ArgumentParser(description="Collect trajectories from an expert policy.")
+    parser.add_argument("--config", type=str, default="l2sml/configs/collect_expert_data.yaml", help="YAML config path.")
+    parser.add_argument("--task", type=str, default=config.get("task", "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0"))
     parser.add_argument(
-        "--config",
-        type=str,
-        default=str(DEFAULT_CONFIG_PATH.resolve()),
-        help="YAML config path.",
+        "--agent", type=str, default=config.get("agent", "rsl_rl_cfg_entry_point"), help="RL agent config entry point."
     )
-    parser.add_argument(
-        "--task",
-        type=str,
-        default=config.get("task", "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0"),
-    )
-    parser.add_argument(
-        "--agent",
-        type=str,
-        default=config.get("agent", "rsl_rl_cfg_entry_point"),
-        help="RL agent config entry point.",
-    )
-    parser.add_argument("--output_dir", type=str, default=config.get("output_dir", "data/eval_policy"))
-    parser.add_argument("--num_rollouts", type=int, default=int(config.get("num_rollouts", 50)))
+    parser.add_argument("--action_std", type=float, default=float(config.get("action_std", 0.0)), help="Action noise standard deviation.")
+    parser.add_argument("--expert_checkpoint", type=str, default=None, help="Alias for --checkpoint.")
+    parser.add_argument("--output_dir", type=str, default=config.get("output_dir", "data/peg_expert"))
+    parser.add_argument("--num_trajectories", type=int, default=int(config.get("num_trajectories", 1000)))
     parser.add_argument("--horizon", type=int, default=int(config.get("horizon", 800)))
     parser.add_argument("--num_envs", type=int, default=int(config.get("num_envs", 1)))
     parser.add_argument("--seed", type=int, default=int(config.get("seed", 0)))
+    parser.add_argument("--save_every", type=int, default=int(config.get("save_every", 50)))
+    parser.add_argument(
+        "--proprio_keys",
+        nargs="*",
+        default=list(config.get("proprio_keys", ["prev_actions", "joint_pos", "end_effector_pose"])),
+    )
+    parser.add_argument(
+        "--asset_keys",
+        nargs="*",
+        default=list(
+            config.get(
+                "asset_keys",
+                [
+                    "insertive_asset_pose",
+                    "receptive_asset_pose",
+                    "insertive_asset_in_receptive_asset_frame",
+                ],
+            )
+        ),
+    )
+    parser.add_argument(
+        "--image_keys",
+        nargs="*",
+        default=list(config.get("image_keys", [])),
+        help="Observation keys to treat as image observations. Empty means auto-detect.",
+    )
+    parser.add_argument(
+        "--required_obs_keys",
+        nargs="*",
+        default=list(
+            config.get(
+                "required_obs_keys",
+                [
+                    "prev_actions",
+                    "joint_pos",
+                    "end_effector_pose",
+                    "insertive_asset_pose",
+                    "receptive_asset_pose",
+                    "insertive_asset_in_receptive_asset_frame",
+                ],
+            )
+        ),
+        help="Fail fast if any required policy observation keys are missing.",
+    )
     parser.add_argument(
         "--capture_rendered_images",
         "--capture-rendered-images",
         action=argparse.BooleanOptionalAction,
-        default=bool(config.get("capture_rendered_images", True)),
-        help="Capture camera frames for video.",
+        default=bool(config.get("capture_rendered_images", False)),
+        help="Capture a stitched front/side RGB video frame every step.",
     )
-    parser.add_argument("--video_fps", type=int, default=int(config.get("video_fps", 10)))
+    parser.add_argument(
+        "--render_image_obs_key",
+        "--render-image-obs-key",
+        type=str,
+        default=str(config.get("render_image_obs_key", "render_rgb")),
+        help="When rendering is enabled, also store stitched frames under obs_images[render_image_obs_key].",
+    )
+    parser.add_argument(
+        "--collect_positions",
+        "--collect-positions",
+        action=argparse.BooleanOptionalAction,
+        default=bool(config.get("collect_positions", config.get("collect positions", False))),
+        help="Store xyz positions from positions obs group into ee/insertive/receptive trajectory fields.",
+    )
+    parser.add_argument(
+        "--disable_fabric", action="store_true", default=bool(config.get("disable_fabric", False)), help="Disable fabric."
+    )
     parser.add_argument(
         "--exact_success",
         action=argparse.BooleanOptionalAction,
         default=bool(config.get("exact_success", False)),
         help="If true, use get_successes(env); otherwise use get_successes_approx(rewards).",
     )
-    parser.add_argument(
-        "--policy_type",
-        type=str,
-        default=config.get("policy_type", "gaussian"),
-        choices=("gaussian", "rsl_rl"),
-        help="Policy type: 'gaussian' for pi_base-trained GaussianPolicy, 'rsl_rl' for RSL-RL actor-critic.",
-    )
+    parser.add_argument("--policy_config", type=str, default=config.get("policy_config", "l2sml/configs/pi_base_config.yaml"))
+    parser.add_argument("--q_function_config", type=str, default=config.get("q_function_config", None))
+    parser.add_argument("--num_q_samples", type=int, default=config.get("num_q_samples", 1))
     cli_args.add_rsl_rl_args(parser)
+    parser.set_defaults(checkpoint=config.get("checkpoint", config.get("expert_checkpoint", "peg_state_rl_expert.pt")))
     AppLauncher.add_app_launcher_args(parser)
-    parser.set_defaults(
-        checkpoint=config.get("checkpoint", "l2sml/outputs/pi_base/pi_base_chunked_best.pt"),
-        headless=bool(config.get("headless", True)),
-    )
+    parser.set_defaults(headless=bool(config.get("headless", True)))
     return parser
 
 
 _pre_parser = argparse.ArgumentParser(add_help=False)
-_pre_parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH.resolve()))
+_pre_parser.add_argument("--config", type=str, default="l2sml/configs/collect_expert_data.yaml")
 _pre_args, _ = _pre_parser.parse_known_args()
 _config = _load_yaml_config(_pre_args.config)
 parser = _build_parser(_config)
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.expert_checkpoint:
+    args_cli.checkpoint = args_cli.expert_checkpoint
 if args_cli.capture_rendered_images:
     args_cli.enable_cameras = True
+# align with rsl_rl/play.py hydra arg handling
 sys.argv = [sys.argv[0]] + hydra_args
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 
-import gymnasium as gym  # noqa: E402
+import gymnasium as gym
+import numpy as np
+import torch
+from tensordict import TensorDict
 
-from isaaclab.envs import (  # noqa: E402
-    DirectMARLEnv,
-    DirectMARLEnvCfg,
-    DirectRLEnvCfg,
-    ManagerBasedRLEnvCfg,
-    multi_agent_to_single_agent,
-)
-from isaaclab.utils.assets import retrieve_file_path  # noqa: E402
-from isaaclab_tasks.utils import get_checkpoint_path  # noqa: E402
-from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper  # noqa: E402
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner  # noqa: E402
+from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
+from isaaclab.envs import DirectMARLEnv, DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg, multi_agent_to_single_agent
+from isaaclab.utils.assets import retrieve_file_path
+from isaaclab_tasks.utils import get_checkpoint_path
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
 import uwlab_tasks  # noqa: F401
-from uwlab_tasks.utils.hydra import hydra_task_config  # noqa: E402
-
-
-def _tensordict_to_dict(obs: Any) -> dict:
-    if hasattr(obs, "to_dict"):
-        return obs.to_dict()
-    return obs if isinstance(obs, dict) else {}
-
-
-def _to_cpu_detached(value: torch.Tensor) -> torch.Tensor:
-    return value.detach().cpu()
+from uwlab_tasks.utils.hydra import hydra_task_config
 
 
 def _is_image_tensor(value: torch.Tensor) -> bool:
@@ -163,18 +172,24 @@ def _is_image_tensor(value: torch.Tensor) -> bool:
     return channels in (1, 3, 4) or channels_alt in (1, 3, 4)
 
 
+def _to_cpu_detached(value: torch.Tensor) -> torch.Tensor:
+    return value.detach().cpu()
+
+
 def _image_tensor_to_uint8_frame(value: torch.Tensor) -> np.ndarray:
     tensor = value.detach().cpu()
     if tensor.ndim == 4 and tensor.shape[0] == 1:
         tensor = tensor[0]
     if tensor.ndim != 3:
         raise RuntimeError(f"Expected image tensor with 3 dims, got shape={tuple(tensor.shape)}.")
+
     if tensor.shape[0] in (1, 3, 4):
         tensor = tensor.permute(1, 2, 0)
     elif tensor.shape[-1] not in (1, 3, 4):
         raise RuntimeError(
             f"Expected image tensor in CHW or HWC format with 1/3/4 channels, got shape={tuple(tensor.shape)}."
         )
+
     frame = tensor.numpy()
     if np.issubdtype(frame.dtype, np.floating):
         if frame.size and float(frame.max()) <= 1.0:
@@ -183,6 +198,7 @@ def _image_tensor_to_uint8_frame(value: torch.Tensor) -> np.ndarray:
     else:
         frame = np.clip(frame, 0, 255)
     frame = frame.astype(np.uint8)
+
     if frame.shape[-1] == 1:
         frame = np.repeat(frame, 3, axis=-1)
     elif frame.shape[-1] == 4:
@@ -190,52 +206,64 @@ def _image_tensor_to_uint8_frame(value: torch.Tensor) -> np.ndarray:
     return frame
 
 
-def _extract_xyz_terms_from_positions_obs(
-    positions_obs: Any,
-) -> dict[str, torch.Tensor]:
-    positions_obs = _tensordict_to_dict(positions_obs)
-    required_terms = {
-        "ee_positions": "end_effector_pose",
-        "insertive_positions": "insertive_asset_pose",
-        "receptive_positions": "receptive_asset_pose",
-    }
-    if isinstance(positions_obs, dict):
-        xyz_terms: dict[str, torch.Tensor] = {}
-        missing_keys: list[str] = []
-        for out_key, obs_key in required_terms.items():
-            pose = positions_obs.get(obs_key)
-            if pose is None:
-                missing_keys.append(obs_key)
-                continue
-            if not isinstance(pose, torch.Tensor):
-                raise RuntimeError(f"Expected {obs_key} to be a torch.Tensor.")
-            if pose.ndim == 1:
-                pose = pose.view(1, -1)
-            if pose.shape[-1] < 3:
-                raise RuntimeError(
-                    f"Expected {obs_key} with >=3 dims, got shape={tuple(pose.shape)}."
-                )
-            xyz_terms[out_key] = pose[..., :3]
-        if len(xyz_terms) == len(required_terms):
-            return xyz_terms
-    if isinstance(positions_obs, torch.Tensor):
-        if positions_obs.ndim == 1:
-            positions_obs = positions_obs.view(1, -1)
-        if positions_obs.shape[-1] < 9:
-            raise RuntimeError(
-                f"Expected positions observation with >=9 dims, got shape={tuple(positions_obs.shape)}."
-            )
-        block_size = positions_obs.shape[-1] // 3
-        if block_size < 3:
-            raise RuntimeError(f"Expected each positions term to have >=3 dims, got block_size={block_size}.")
-        return {
-            "ee_positions": positions_obs[..., 0:3],
-            "insertive_positions": positions_obs[..., block_size : block_size + 3],
-            "receptive_positions": positions_obs[..., 2 * block_size : 2 * block_size + 3],
-        }
-    if fallback_obs is not None:
-        return _extract_xyz_terms_from_positions_obs(fallback_obs, fallback_obs=None)
-    raise RuntimeError(f"Unsupported positions observation type: {type(positions_obs)}.")
+
+
+
+def _normalize_obs_dict(policy_obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    normalized: dict[str, torch.Tensor] = {}
+    for key, value in policy_obs.items():
+        if not isinstance(value, torch.Tensor):
+            continue
+        if value.ndim == 0:
+            normalized[key] = value.view(1, 1)
+        elif value.ndim == 1:
+            normalized[key] = value.view(1, -1)
+        elif value.ndim >= 2:
+            normalized[key] = value
+    return normalized
+
+
+def _concat_policy_obs(policy_obs: dict[str, torch.Tensor]) -> torch.Tensor:
+    parts = []
+    for _, value in policy_obs.items():
+        if value.ndim == 1:
+            part = value.view(1, -1)
+        else:
+            part = value.reshape(value.shape[0], -1)
+        parts.append(part)
+    if not parts:
+        raise RuntimeError("Policy observation dict is empty; cannot run expert policy.")
+    return torch.cat(parts, dim=-1)
+
+
+def _classify_obs_keys(
+    policy_obs: dict[str, torch.Tensor], proprio_keys: list[str], asset_keys: list[str], image_keys: list[str]
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    all_keys = [k for k in policy_obs.keys() if isinstance(policy_obs[k], torch.Tensor)]
+    image_set = set(image_keys)
+    if not image_set:
+        image_set = {k for k in all_keys if _is_image_tensor(policy_obs[k])}
+    proprio_set = set(proprio_keys)
+    asset_set = set(asset_keys)
+    proprio_found = [k for k in all_keys if k in proprio_set and k not in image_set]
+    asset_found = [k for k in all_keys if k in asset_set and k not in image_set]
+    image_found = [k for k in all_keys if k in image_set]
+    other_found = [k for k in all_keys if k not in image_set and k not in proprio_set and k not in asset_set]
+    return proprio_found, asset_found, image_found, other_found
+
+
+def _validate_required_obs_keys(policy_obs: dict[str, torch.Tensor], required_keys: list[str]) -> None:
+    missing = [k for k in required_keys if k not in policy_obs]
+    if missing:
+        raise RuntimeError(f"Missing required observation keys: {missing}. Available keys: {sorted(policy_obs.keys())}")
+
+
+def _resolve_checkpoint_path(agent_cfg: RslRlBaseRunnerCfg) -> str:
+    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
+    log_root_path = os.path.abspath(log_root_path)
+    if args_cli.checkpoint:
+        return retrieve_file_path(args_cli.checkpoint)
+    return get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
 
 def _make_env_from_cfg(
@@ -267,7 +295,7 @@ def _build_policy_term_slices(
     for dims in term_dims:
         if len(dims) != 1:
             raise RuntimeError(
-                f"Only 1D concatenated policy terms are supported, got dims={dims} for policy group."
+                f"Only 1D concatenated policy terms are supported for slicing, got dims={dims} for policy group."
             )
         length = int(dims[0])
         slices.append((start, start + length))
@@ -281,143 +309,56 @@ def _split_policy_obs(
     return {name: policy_obs_tensor[:, start:end] for name, (start, end) in zip(term_names, slices)}
 
 
-def _resolve_checkpoint_path(agent_cfg: RslRlBaseRunnerCfg) -> str:
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
-    if args_cli.checkpoint:
-        return retrieve_file_path(args_cli.checkpoint)
-    return get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+def _tensordict_to_dict(obs):
+    if hasattr(obs, "to_dict"):
+        return obs.to_dict()
+    return obs
 
 
-def _load_gaussian_policy_checkpoint(
-    checkpoint_path: str | Path,
-    device: torch.device,
-) -> tuple[Any, int]:
-    """Load GaussianPolicy from pi_base checkpoint. Returns (model, action_chunk_dim)."""
-    GaussianPolicyClass = _load_gaussian_policy_module()
-    path = Path(checkpoint_path).expanduser()
-    if not path.is_absolute():
-        path = path.resolve()
-    if not path.exists():
-        path = Path(retrieve_file_path(str(checkpoint_path)))
-    if not path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(ckpt, dict):
-        raise ValueError(f"Expected checkpoint dict, got {type(ckpt)}")
-    state_dim = ckpt.get("state_dim")
-    action_chunk_dim = ckpt.get("action_chunk_dim")
-    hidden_dims = ckpt.get("hidden_dims")
-    if state_dim is None or action_chunk_dim is None or hidden_dims is None:
-        raise KeyError(
-            f"Checkpoint must contain state_dim, action_chunk_dim, hidden_dims; got keys {list(ckpt.keys())}"
-        )
-    model = GaussianPolicyClass(
-        state_dim=int(state_dim),
-        action_dim=int(action_chunk_dim),
-        hidden_dims=hidden_dims,
-    )
-    model.load_state_dict(ckpt["model_state_dict"], strict=True)
-    model.to(device)
-    model.eval()
-    return model, int(action_chunk_dim)
-
-
-def get_successes(env: RslRlVecEnvWrapper) -> torch.Tensor:
-    successes = torch.zeros((env.num_envs,), device=env.device)
-    for i in range(env.num_envs):
-        successes[i] = env.unwrapped.reward_manager.get_active_iterable_terms(i)[7][1][0]
-    return successes
-
-
-def get_successes_approx(rew: torch.Tensor) -> torch.Tensor:
-    return torch.where(rew > 0.05, 1.0, 0.0)
-
-
-def _eval_trajectory_template() -> dict[str, Any]:
-    return {
-        "ee_positions": [],
-        "insertive_positions": [],
-        "receptive_positions": [],
-        "camera_frames": [],
-        "rewards": [],
-        "terminated": [],
-        "truncated": [],
-    }
-
-
-def _append_eval_step(
-    traj: dict[str, Any],
-    env_idx: int,
-    position_terms_xyz: dict[str, torch.Tensor],
-    cameras_obs: dict[str, Any],
-    rew: torch.Tensor,
-    done: torch.Tensor,
-    time_out: torch.Tensor,
-    capture_frames: bool,
-) -> None:
-    traj["ee_positions"].append(_to_cpu_detached(position_terms_xyz["ee_positions"][env_idx : env_idx + 1]))
-    traj["insertive_positions"].append(
-        _to_cpu_detached(position_terms_xyz["insertive_positions"][env_idx : env_idx + 1])
-    )
-    traj["receptive_positions"].append(
-        _to_cpu_detached(position_terms_xyz["receptive_positions"][env_idx : env_idx + 1])
-    )
-    traj["rewards"].append(_to_cpu_detached(rew[env_idx : env_idx + 1].view(1, 1)))
-    traj["terminated"].append(
-        _to_cpu_detached((done[env_idx] & ~time_out[env_idx]).float().view(1, 1))
-    )
-    traj["truncated"].append(_to_cpu_detached(time_out[env_idx].float().view(1, 1)))
-    if capture_frames and cameras_obs:
-        first_frame = None
-        for cam_key, cam_tensor in cameras_obs.items():
-            if isinstance(cam_tensor, torch.Tensor) and _is_image_tensor(cam_tensor):
-                first_frame = _image_tensor_to_uint8_frame(cam_tensor[env_idx : env_idx + 1].squeeze(0))
-                break
-        if first_frame is not None:
-            traj["camera_frames"].append(first_frame)
-
-
-def _finalize_eval_trajectory(traj: dict[str, Any], success: float) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    out["ee_positions"] = (
-        torch.cat(traj["ee_positions"], dim=0) if traj["ee_positions"] else torch.empty((0, 3))
-    )
-    out["insertive_positions"] = (
-        torch.cat(traj["insertive_positions"], dim=0) if traj["insertive_positions"] else torch.empty((0, 3))
-    )
-    out["receptive_positions"] = (
-        torch.cat(traj["receptive_positions"], dim=0) if traj["receptive_positions"] else torch.empty((0, 3))
-    )
-    if traj["camera_frames"]:
-        out["camera_frames"] = np.stack(traj["camera_frames"], axis=0)
-    else:
-        out["camera_frames"] = np.empty((0,), dtype=np.uint8)
-    out["success"] = float(success)
-    out["steps"] = int(out["ee_positions"].shape[0])
-    return out
-
-
-def _save_eval_trajectory(
-    traj: dict[str, Any],
-    traj_idx: int,
-    traj_dir: Path,
-    output_dir: Path,
-    manifest: dict[str, Any],
-    done: bool,
-    success: float,
-) -> None:
-    serialized = _finalize_eval_trajectory(traj, success)
-    traj_file = traj_dir / f"traj_{traj_idx:06d}.pt"
-    torch.save(serialized, traj_file)
-    manifest["files"].append(
-        {
-            "trajectory_id": traj_idx,
-            "file": str(traj_file.relative_to(output_dir)),
-            "steps": serialized["steps"],
-            "done": done,
-            "success": success,
+def _extract_xyz_terms_from_positions_obs(positions_obs: Any) -> dict[str, torch.Tensor]:
+    positions_obs = _tensordict_to_dict(positions_obs)
+    if isinstance(positions_obs, dict):
+        required_terms = {
+            "ee_positions": "end_effector_pose",
+            "insertive_positions": "insertive_asset_pose",
+            "receptive_positions": "receptive_asset_pose",
         }
+        xyz_terms: dict[str, torch.Tensor] = {}
+        for out_key, obs_key in required_terms.items():
+            pose = positions_obs.get(obs_key)
+            if pose is None:
+                raise RuntimeError(
+                    f"collect_positions=True requires observations['positions']['{obs_key}'] to be available."
+                )
+            if not isinstance(pose, torch.Tensor):
+                raise RuntimeError(f"collect_positions=True expected positions.{obs_key} to be a torch.Tensor.")
+            if pose.ndim == 1:
+                pose = pose.view(1, -1)
+            if pose.shape[-1] < 3:
+                raise RuntimeError(
+                    f"collect_positions=True expected positions.{obs_key} with >=3 dims, got shape={tuple(pose.shape)}."
+                )
+            xyz_terms[out_key] = pose[..., :3]
+        return xyz_terms
+    if isinstance(positions_obs, torch.Tensor):
+        if positions_obs.ndim == 1:
+            positions_obs = positions_obs.view(1, -1)
+        if positions_obs.shape[-1] < 9:
+            raise RuntimeError(
+                f"collect_positions=True expected positions observation with >=9 dims, got shape={tuple(positions_obs.shape)}."
+            )
+        block_size = positions_obs.shape[-1] // 3
+        if block_size < 3:
+            raise RuntimeError(
+                f"collect_positions=True expected each positions term to have >=3 dims, got block_size={block_size}."
+            )
+        return {
+            "ee_positions": positions_obs[..., 0:3],
+            "insertive_positions": positions_obs[..., block_size : block_size + 3],
+            "receptive_positions": positions_obs[..., 2 * block_size : 2 * block_size + 3],
+        }
+    raise RuntimeError(
+        f"collect_positions=True got unsupported positions observation type: {type(positions_obs)}."
     )
 
 
@@ -426,114 +367,193 @@ def _save_run_manifest(output_dir: Path, manifest: dict[str, Any]) -> None:
         json.dump(manifest, f, indent=2)
 
 
-def _ensure_uint8(frames: np.ndarray) -> np.ndarray:
-    if frames.dtype == np.uint8:
-        return frames
-    clipped = np.clip(frames, 0, 255)
-    if clipped.size and float(np.max(clipped)) <= 1.0:
-        clipped = clipped * 255.0
-    return clipped.astype(np.uint8)
+def _trajectory_template(*, collect_positions: bool = False) -> dict[str, Any]:
+    traj = {
+        "actions": [],
+        "rewards": [],
+        "terminated": [],
+        "truncated": [],
+        "obs_flat": [],
+        "obs_proprio": {},
+        "obs_assets": {},
+        "obs_images": {},
+        "obs_other_state": {},
+        "rendered_images": [],
+    }
+    if collect_positions:
+        traj["ee_positions"] = []
+        traj["insertive_positions"] = []
+        traj["receptive_positions"] = []
+    return traj
 
 
-def _write_videos(traj_dir: Path, output_dir: Path, num_rollouts: int, video_fps: int) -> None:
-    videos_dir = output_dir / "videos"
-    videos_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        import imageio.v2 as imageio
-    except Exception as exc:
-        raise RuntimeError("imageio is required to write videos. Install it in your env.") from exc
-    for traj_idx in range(num_rollouts):
-        traj_file = traj_dir / f"traj_{traj_idx:06d}.pt"
-        if not traj_file.exists():
-            continue
-        data = torch.load(traj_file, map_location="cpu", weights_only=False)
-        frames = data.get("camera_frames")
-        if frames is None or not isinstance(frames, np.ndarray) or frames.size == 0:
-            continue
-        if frames.ndim == 3:
-            frames = np.expand_dims(frames, axis=0)
-        safe_frames = _ensure_uint8(frames)
-        out_path = videos_dir / f"traj_{traj_idx:06d}.mp4"
-        writer = imageio.get_writer(out_path, fps=video_fps, codec="libx264")
-        for frame in safe_frames:
-            if frame.ndim == 2:
-                frame = np.stack([frame, frame, frame], axis=-1)
-            if frame.shape[-1] == 1:
-                frame = np.repeat(frame, 3, axis=-1)
-            writer.append_data(frame)
-        writer.close()
-    print(f"[INFO] Saved trajectory videos to {videos_dir}")
+def _append_obs_to_trajectory(
+    traj: dict[str, Any],
+    policy_obs: dict[str, torch.Tensor],
+    obs_flat: torch.Tensor,
+    env_idx: int,
+    proprio_keys: list[str],
+    asset_keys: list[str],
+    image_keys: list[str],
+    other_keys: list[str],
+    *,
+    collect_positions: bool = False,
+    position_terms_xyz: dict[str, torch.Tensor] | None = None,
+) -> None:
+    traj["obs_flat"].append(_to_cpu_detached(obs_flat[env_idx : env_idx + 1]))
+    for key in proprio_keys:
+        traj["obs_proprio"].setdefault(key, []).append(_to_cpu_detached(policy_obs[key][env_idx : env_idx + 1]))
+    for key in asset_keys:
+        traj["obs_assets"].setdefault(key, []).append(_to_cpu_detached(policy_obs[key][env_idx : env_idx + 1]))
+    for key in image_keys:
+        traj["obs_images"].setdefault(key, []).append(_to_cpu_detached(policy_obs[key][env_idx : env_idx + 1]))
+    for key in other_keys:
+        traj["obs_other_state"].setdefault(key, []).append(_to_cpu_detached(policy_obs[key][env_idx : env_idx + 1]))
+    if collect_positions:
+        if position_terms_xyz is None:
+            raise RuntimeError("collect_positions=True but positions observation was not provided.")
+        traj["ee_positions"].append(_to_cpu_detached(position_terms_xyz["ee_positions"][env_idx : env_idx + 1]))
+        traj["insertive_positions"].append(
+            _to_cpu_detached(position_terms_xyz["insertive_positions"][env_idx : env_idx + 1])
+        )
+        traj["receptive_positions"].append(
+            _to_cpu_detached(position_terms_xyz["receptive_positions"][env_idx : env_idx + 1])
+        )
 
 
-def _plot_all_trajectories_3d(traj_dir: Path, output_dir: Path, num_rollouts: int) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def _finalize_trajectory(traj: dict[str, Any], success: float | None = None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    out["actions"] = torch.cat(traj["actions"], dim=0) if traj["actions"] else torch.empty(0)
+    out["rewards"] = torch.cat(traj["rewards"], dim=0) if traj["rewards"] else torch.empty(0)
+    out["terminated"] = torch.cat(traj["terminated"], dim=0) if traj["terminated"] else torch.empty(0, dtype=torch.bool)
+    out["truncated"] = torch.cat(traj["truncated"], dim=0) if traj["truncated"] else torch.empty(0, dtype=torch.bool)
+    out["obs_flat"] = torch.cat(traj["obs_flat"], dim=0) if traj["obs_flat"] else torch.empty(0)
 
-    plots_dir = output_dir / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection="3d")
-    for traj_idx in range(num_rollouts):
-        traj_file = traj_dir / f"traj_{traj_idx:06d}.pt"
-        if not traj_file.exists():
-            continue
-        data = torch.load(traj_file, map_location="cpu", weights_only=False)
-        ee = data["ee_positions"].numpy()
-        ins = data["insertive_positions"].numpy()
-        rec = data["receptive_positions"].numpy()
-        success = data.get("success", 0.0)
-        alpha = 0.4 if success else 0.25
-        color_ee = "green" if success else "red"
-        ax.plot(ee[:, 0], ee[:, 1], ee[:, 2], color=color_ee, alpha=alpha, linewidth=0.8)
-        ax.plot(ins[:, 0], ins[:, 1], ins[:, 2], color="tab:orange", alpha=alpha, linewidth=0.8)
-        ax.plot(rec[:, 0], rec[:, 1], rec[:, 2], color="tab:green", alpha=alpha, linewidth=0.8)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_zlabel("z")
-    ax.set_title("All trajectories (green=success, red=fail)")
-    plt.tight_layout()
-    plt.savefig(plots_dir / "all_trajectories_3d.png", dpi=150)
-    plt.close(fig)
-    print(f"[INFO] Saved 3D trajectory plot to {plots_dir / 'all_trajectories_3d.png'}")
+    out["obs_proprio"] = {
+        key: torch.cat(values, dim=0) if values else torch.empty(0) for key, values in traj["obs_proprio"].items()
+    }
+    out["obs_assets"] = {
+        key: torch.cat(values, dim=0) if values else torch.empty(0) for key, values in traj["obs_assets"].items()
+    }
+    out["obs_images"] = {
+        key: torch.cat(values, dim=0) if values else torch.empty(0) for key, values in traj["obs_images"].items()
+    }
+    out["obs_other_state"] = {
+        key: torch.cat(values, dim=0) if values else torch.empty(0) for key, values in traj["obs_other_state"].items()
+    }
+    if traj["rendered_images"]:
+        out["rendered_images"] = torch.from_numpy(np.stack(traj["rendered_images"], axis=0))
+    else:
+        out["rendered_images"] = torch.empty((0,), dtype=torch.uint8)
+    if "ee_positions" in traj:
+        out["ee_positions"] = torch.cat(traj["ee_positions"], dim=0) if traj["ee_positions"] else torch.empty((0, 3))
+        out["insertive_positions"] = (
+            torch.cat(traj["insertive_positions"], dim=0) if traj["insertive_positions"] else torch.empty((0, 3))
+        )
+        out["receptive_positions"] = (
+            torch.cat(traj["receptive_positions"], dim=0) if traj["receptive_positions"] else torch.empty((0, 3))
+        )
+    if success is not None:
+        out["success"] = torch.tensor(success, dtype=torch.float32)
+    return out
 
 
-def _plot_success_rate(num_success: int, num_failure: int, output_dir: Path) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+def _to_nested_tensordict(data: dict[str, Any]) -> TensorDict:
+    converted: dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            converted[key] = _to_nested_tensordict(value)
+        elif isinstance(value, torch.Tensor):
+            converted[key] = value.detach().cpu()
+        elif isinstance(value, np.ndarray):
+            converted[key] = torch.from_numpy(value)
+        elif isinstance(value, (float, int, bool)):
+            converted[key] = torch.tensor(value)
+        else:
+            raise TypeError(f"Unsupported value type for TensorDict conversion at key '{key}': {type(value)}")
+    return TensorDict(converted, batch_size=[]).cpu()
 
-    plots_dir = output_dir / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    total = num_success + num_failure
-    percent_success = (100.0 * num_success / total) if total else 0.0
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.bar([0], [num_success], width=0.4, label="Success", color="green", alpha=0.8)
-    ax.bar([1], [num_failure], width=0.4, label="Failure", color="red", alpha=0.8)
-    ax.set_xticks([0, 1])
-    ax.set_xticklabels(["Success", "Failure"])
-    ax.set_ylabel("Count")
-    ax.set_title(f"Success rate: {percent_success:.1f}% ({num_success}/{total})")
-    ax.legend()
-    plt.tight_layout()
-    plt.savefig(plots_dir / "success_rate.png", dpi=150)
-    plt.close(fig)
-    print(f"[INFO] Saved success rate plot to {plots_dir / 'success_rate.png'}")
+
+def _trajectory_key(traj_idx: int) -> str:
+    return f"traj_{traj_idx:06d}"
+
+
+def _save_trajectory_dataset(dataset: dict[str, TensorDict], dataset_file: Path) -> None:
+    torch.save(TensorDict(dataset, batch_size=[]).cpu(), dataset_file)
+
+
+def _save_trajectory(
+    traj: dict[str, Any],
+    traj_idx: int,
+    dataset: dict[str, TensorDict],
+    dataset_file: Path,
+    output_dir: Path,
+    manifest: dict[str, Any],
+    done: bool,
+    success: float,
+) -> None:
+    serialized = _finalize_trajectory(traj, success=success)
+    traj_key = _trajectory_key(traj_idx)
+    dataset[traj_key] = _to_nested_tensordict(serialized)
+    manifest["files"].append(
+        {
+            "trajectory_id": traj_idx,
+            "key": traj_key,
+            "file": str(dataset_file.relative_to(output_dir)),
+            "steps": int(serialized["actions"].shape[0]),
+            "done": done,
+            "success": success,
+        }
+    )
+
+def load_policy(policy_config: dict[str, Any], state_dim: int, action_dim: int) -> tuple[DeterministicPolicy, int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    action_chunk_dim = policy_config["action_chunk_dim"]
+    model = DeterministicPolicy(state_dim, action_dim*action_chunk_dim, policy_config["hidden_dims"])
+    checkpoint = torch.load(Path(policy_config["output_dir"]) / "best_model.pt", map_location="cpu", weights_only=False)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    action_mean = checkpoint["action_mean"]
+    action_std = checkpoint["action_std"]
+    state_mean = checkpoint["state_mean"]
+    state_std = checkpoint["state_std"]
+    model.eval()
+    return model, action_chunk_dim, action_mean, action_std, state_mean, state_std
+
+def load_q_function(q_function_config: dict[str, Any], state_dim: int, action_dim: int) -> QFunction:
+    model = QFunction(state_dim, action_dim, q_function_config["hidden_dims"])
+    checkpoint = torch.load(Path(q_function_config["output_dir"]) / "best_model.pt", map_location="cpu", weights_only=False)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+    return model
+
+def get_successes(env: RslRlVecEnvWrapper) -> torch.Tensor:
+    successes = torch.zeros((env.num_envs,), device=env.device)
+    for i in range(env.num_envs):
+        successes[i] = env.unwrapped.reward_manager.get_active_iterable_terms(i)[7][1][0]
+    return successes
+
+def get_successes_approx(rew: torch.Tensor) -> torch.Tensor:
+    return torch.where(rew > 0.05, 1.0, 0.0)
+
+def _load_config(config_path: Path) -> dict[str, Any]:
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Config at {config_path} must be a YAML mapping.")
+    return cfg
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
-def main(
-    env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
-    agent_cfg: RslRlBaseRunnerCfg,
-) -> None:
+def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg) -> None:
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.scene.num_envs = num_envs
     env_cfg.seed = args_cli.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     output_dir = Path(args_cli.output_dir)
-    traj_dir = output_dir / "trajectories"
-    traj_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dataset_file = output_dir / "trajectories.pt"
 
     gym_env = _make_env_from_cfg(
         env_cfg,
@@ -542,133 +562,153 @@ def main(
         render_mode="rgb_array" if args_cli.capture_rendered_images else None,
     )
     env = RslRlVecEnvWrapper(gym_env, clip_actions=agent_cfg.clip_actions)
-    device = torch.device(env.unwrapped.device if hasattr(env.unwrapped, "device") else "cuda")
-    num_actions = env.num_actions
 
-    if args_cli.policy_type == "gaussian":
-        checkpoint_path = args_cli.checkpoint or "l2sml/outputs/pi_base/pi_base_chunked_best.pt"
-        print(f"[INFO] Loading Gaussian policy from: {checkpoint_path}")
-        gaussian_model, action_chunk_dim = _load_gaussian_policy_checkpoint(checkpoint_path, device)
-
-        def policy(obs: Any) -> torch.Tensor:
-            obs_flat = obs["policy"]
-            if isinstance(obs_flat, torch.Tensor):
-                state = obs_flat.to(device)
-            else:
-                state = torch.as_tensor(obs_flat, device=device, dtype=torch.float32)
-            with torch.inference_mode():
-                mean, _ = gaussian_model(state)
-            return mean[:, :num_actions]
-
-        resume_path = str(Path(checkpoint_path).resolve())
-    else:
-        resume_path = _resolve_checkpoint_path(agent_cfg)
-        print(f"[INFO] Loading RSL-RL checkpoint from: {resume_path}")
-        if agent_cfg.class_name == "OnPolicyRunner":
-            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        elif agent_cfg.class_name == "DistillationRunner":
-            runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        else:
-            raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-        runner.load(resume_path)
-        policy = runner.get_inference_policy(device=env.unwrapped.device)
-
+    policy_config = _load_config(Path(args_cli.policy_config))
+    state_dim = env.get_observations()["policy"].shape[1]
+    action_dim = 7
+    policy, action_chunk_dim, action_mean, action_std, state_mean, state_std = load_policy(policy_config, state_dim, action_dim)
+    state_mean = state_mean.to(env.device)
+    state_std = state_std.to(env.device)
+    action_mean = action_mean.to(env.device)
+    action_std = action_std.to(env.device)
+    policy.to(env.device)
+    if args_cli.q_function_config is not None:
+        q_function_config = _load_config(Path(args_cli.q_function_config))
+        q_function = load_q_function(q_function_config, state_dim, action_dim*action_chunk_dim)
+        q_function.to(env.device)
     policy_term_names, _, policy_term_slices = _build_policy_term_slices(gym_env)
+
     torch.manual_seed(args_cli.seed)
     np.random.seed(args_cli.seed)
 
     manifest: dict[str, Any] = {
         "created_at": datetime.now().isoformat(),
         "task": args_cli.task,
-        "checkpoint": str(Path(args_cli.checkpoint).resolve()) if args_cli.checkpoint else resume_path,
+        "expert_checkpoint": str(Path(args_cli.checkpoint).resolve()),
         "output_dir": str(output_dir.resolve()),
-        "num_rollouts": args_cli.num_rollouts,
+        "dataset_file": str(dataset_file.relative_to(output_dir)),
+        "num_trajectories": args_cli.num_trajectories,
         "horizon": args_cli.horizon,
         "num_envs": num_envs,
         "seed": args_cli.seed,
         "files": [],
     }
 
-    target = args_cli.num_rollouts
+    target = args_cli.num_trajectories
     collected = 0
-    trajectories: list[dict[str, Any]] = [_eval_trajectory_template() for _ in range(num_envs)]
+    trajectories: list[dict[str, Any]] = [
+        _trajectory_template(collect_positions=args_cli.collect_positions) for _ in range(num_envs)
+    ]
+    saved_trajectories: dict[str, TensorDict] = {}
     step_counts = [0] * num_envs
-
     try:
         obs = _tensordict_to_dict(env.get_observations())
-        with tqdm(total=target, desc="Evaluating policy") as pbar:
+        step_in_chunk = torch.zeros((num_envs,), dtype=torch.long, device=env.device)
+        action_chunks = torch.zeros((num_envs, action_chunk_dim, action_dim), device=env.device)
+        with tqdm(total=target, desc="Collecting trajectories") as pbar:
             while collected < target:
-                position_terms_xyz = _extract_xyz_terms_from_positions_obs(
-                    obs.get("positions"),
+                obs_flat = obs["policy"]
+                policy_obs_raw = _split_policy_obs(obs_flat, policy_term_names, policy_term_slices)
+                _validate_required_obs_keys(policy_obs_raw, args_cli.required_obs_keys)
+                proprio_keys, asset_keys, image_keys, other_keys = _classify_obs_keys(
+                    policy_obs_raw, args_cli.proprio_keys, args_cli.asset_keys, args_cli.image_keys
                 )
+                position_terms_xyz = None
+                if args_cli.collect_positions:
+                    position_terms_xyz = _extract_xyz_terms_from_positions_obs(obs.get("positions"))
+
                 cameras_obs = _tensordict_to_dict(obs.get("cameras")) if obs.get("cameras") is not None else {}
                 if not isinstance(cameras_obs, dict):
                     cameras_obs = {}
 
+                for ei in range(num_envs):
+                    if collected >= target:
+                        break
+                    _append_obs_to_trajectory(
+                        trajectories[ei], policy_obs_raw, obs_flat, ei,
+                        proprio_keys, asset_keys, image_keys, other_keys,
+                        collect_positions=args_cli.collect_positions,
+                        position_terms_xyz=position_terms_xyz,
+                    )
+                    if args_cli.capture_rendered_images and cameras_obs:
+                        for cam_key, cam_tensor in cameras_obs.items():
+                            if isinstance(cam_tensor, torch.Tensor) and _is_image_tensor(cam_tensor):
+                                trajectories[ei]["obs_images"].setdefault(cam_key, []).append(
+                                    _to_cpu_detached(cam_tensor[ei : ei + 1])
+                                )
+
                 with torch.inference_mode():
-                    action = policy(obs)
+                    state = obs_flat[step_in_chunk == 0, :]
+                    if state.shape[0] > 0:
+                        action_chunks[step_in_chunk == 0, ...] = policy.get_action(state, state_mean, state_std, action_mean, action_std).reshape(state.shape[0], action_chunk_dim, action_dim)
+                        num_selected = state.shape[0]
+                        if args_cli.q_function_config is not None:
+                            q_action_chunks = action_chunks[step_in_chunk == 0, ...].reshape(-1, action_chunk_dim*action_dim)
+                            q_action_chunks = q_action_chunks.unsqueeze(1).expand(-1, args_cli.num_q_samples, -1)
+                            noise = torch.randn_like(q_action_chunks) * args_cli.action_std
+                            q_action_chunks = q_action_chunks + noise
+                            q_state = state.unsqueeze(1).expand(-1, args_cli.num_q_samples, -1)
+                            q_values = q_function(q_state.reshape(-1, state_dim), q_action_chunks.reshape(-1, action_chunk_dim*action_dim))
+                            q_values = q_values.reshape(-1, args_cli.num_q_samples)
+                            chunk_indicies = q_values.argmax(dim=-1)
+                            action_chunks[step_in_chunk == 0, ...] = q_action_chunks[torch.arange(num_selected), chunk_indicies, :].reshape(num_selected, action_chunk_dim, action_dim)
+                    action = action_chunks[torch.arange(num_envs), step_in_chunk, :].reshape(num_envs, action_dim)
 
                 obs, rew, dones, extras = env.step(action)
                 time_outs = extras.get("time_outs", torch.zeros_like(dones))
+                step_in_chunk += 1
+                step_in_chunk = step_in_chunk % action_chunk_dim
 
                 for ei in range(num_envs):
                     if collected >= target:
                         break
-                    _append_eval_step(
-                        trajectories[ei],
-                        ei,
-                        position_terms_xyz,
-                        cameras_obs,
-                        rew,
-                        dones,
-                        time_outs,
-                        args_cli.capture_rendered_images,
+                    trajectories[ei]["actions"].append(_to_cpu_detached(action[ei : ei + 1]))
+                    trajectories[ei]["rewards"].append(_to_cpu_detached(rew[ei : ei + 1].view(1, 1)))
+                    trajectories[ei]["terminated"].append(
+                        _to_cpu_detached((dones[ei] & ~time_outs[ei]).float().view(1, 1))
+                    )
+                    trajectories[ei]["truncated"].append(
+                        _to_cpu_detached(time_outs[ei].float().view(1, 1))
                     )
                     step_counts[ei] += 1
+
                     env_done = bool(dones[ei].item())
                     horizon_hit = step_counts[ei] >= args_cli.horizon
 
                     if env_done or horizon_hit:
+                        step_in_chunk[ei] = 0
                         if args_cli.exact_success:
                             success_tensor = get_successes(env)
                             success_val = float(success_tensor[ei].item())
                         else:
                             traj_rew = torch.cat(trajectories[ei]["rewards"], dim=0)
                             success_val = float(get_successes_approx(traj_rew).any().item())
-                        _save_eval_trajectory(
-                            trajectories[ei],
-                            collected,
-                            traj_dir,
-                            output_dir,
-                            manifest,
-                            env_done,
-                            success_val,
+                        _save_trajectory(
+                            trajectories[ei], collected, saved_trajectories, dataset_file, output_dir, manifest, env_done, success_val,
                         )
                         collected += 1
                         pbar.update(1)
-                        trajectories[ei] = _eval_trajectory_template()
+                        trajectories[ei] = _trajectory_template(collect_positions=args_cli.collect_positions)
                         step_counts[ei] = 0
+
+                        if collected % args_cli.save_every == 0 or collected == target:
+                            _save_trajectory_dataset(saved_trajectories, dataset_file)
+                            _save_run_manifest(output_dir, manifest)
+                            print(f"[INFO] Collected {collected}/{target} trajectories.")
+
     finally:
         env.close()
 
-    num_success = sum(1 for f in manifest["files"] if f.get("success", 0) > 0.5)
-    num_failure = len(manifest["files"]) - num_success
-    percent_success = (100.0 * num_success / len(manifest["files"])) if manifest["files"] else 0.0
-    manifest["num_success"] = num_success
-    manifest["num_failure"] = num_failure
-    manifest["percent_success"] = percent_success
+    _save_trajectory_dataset(saved_trajectories, dataset_file)
     _save_run_manifest(output_dir, manifest)
-
-    print(f"[INFO] Saved {len(manifest['files'])} rollouts to {output_dir.resolve()}")
-    print(f"[INFO] Success: {num_success}, Failure: {num_failure}, Rate: {percent_success:.1f}%")
-
-    if args_cli.capture_rendered_images:
-        _write_videos(traj_dir, output_dir, len(manifest["files"]), args_cli.video_fps)
-    else:
-        print("[INFO] No camera frames; skipping video creation.")
-
-    _plot_all_trajectories_3d(traj_dir, output_dir, len(manifest["files"]))
-    _plot_success_rate(num_success, num_failure, output_dir)
+    print(f"[INFO] Saved dataset to {dataset_file.resolve()}")
+    print(f"[INFO] Total trajectories: {len(manifest['files'])}")
+    successful_trajectories = sum(float(traj_info.get("success", 0.0)) > 0.0 for traj_info in manifest["files"])
+    success_percentage = (100.0 * successful_trajectories / len(manifest["files"])) if manifest["files"] else 0.0
+    print(
+        f"[INFO] Successful trajectories: {successful_trajectories}/{len(manifest['files'])} "
+        f"({success_percentage:.2f}%)"
+    )
 
 
 if __name__ == "__main__":

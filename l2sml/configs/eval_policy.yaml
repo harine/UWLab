@@ -1,13 +1,35 @@
 task: "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-RGB-DataCollection-v0"
 agent: "rsl_rl_cfg_entry_point"
-policy_type: "gaussian"
-checkpoint: "l2sml/outputs/pi_base/pi_base_chunked_best.pt"
+checkpoint: "expert_policies/peg_state_rl_expert.pt"
 output_dir: "data/eval_policy"
-num_rollouts: 50
+num_trajectories: 100
 horizon: 800
 num_envs: 64
 seed: 0
+save_every: 25
+disable_fabric: false
 headless: true
 capture_rendered_images: true
-video_fps: 10
+collect_positions: true
+render_image_obs_key: "render_rgb"
+action_std: 4.0
+proprio_keys:
+  - "prev_actions"
+  - "joint_pos"
+  - "end_effector_pose"
+asset_keys:
+  - "insertive_asset_pose"
+  - "receptive_asset_pose"
+  - "insertive_asset_in_receptive_asset_frame"
+image_keys: []
+required_obs_keys:
+  - "prev_actions"
+  - "joint_pos"
+  - "end_effector_pose"
+  - "insertive_asset_pose"
+  - "receptive_asset_pose"
+  - "insertive_asset_in_receptive_asset_frame"
 exact_success: true
+policy_config: "l2sml/configs/pi_base_config.yaml"
+q_function_config: "l2sml/configs/train_q.yaml"
+num_q_samples: 100

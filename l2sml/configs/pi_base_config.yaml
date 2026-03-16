@@ -1,10 +1,10 @@
-data_path: "data/peg_expert/trajectories/q_data_chunk_5_gamma_0.97.pt"
+data_path: "data/peg_policy_10000/trajectories_q_data_chunk_20_gamma_0.97.pt"
 output_dir: "l2sml/outputs/pi_base"
 run_name: "pi_base_chunked"
 seed: 0
 device: "cuda:1"
-hidden_dims: [512, 256, 128, 64]
-epochs: 20
+hidden_dims: [2048, 2048, 2048, 2048, 2048, 2048]
+epochs: 50
 batch_size: 256
 learning_rate: 0.001
 weight_decay: 0.0
@@ -15,3 +15,4 @@ pin_memory: false
 log_every: 10
 save_every: 50
 max_files: 0
+action_chunk_dim: 20
