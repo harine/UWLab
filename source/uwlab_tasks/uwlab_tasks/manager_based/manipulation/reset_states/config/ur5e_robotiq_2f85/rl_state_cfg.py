@@ -282,6 +282,58 @@ class EvalEventCfg(BaseEventCfg):
 
 
 @configclass
+class CollectEventCfg:
+    """Minimal event config for expert data collection -- no dynamics randomization."""
+
+    randomize_robot_joint_parameters = EventTerm(
+        func=task_mdp.randomize_joint_parameters,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["shoulder.*", "elbow.*", "wrist.*", "finger_joint"]),
+            "friction_distribution_params": (0.25, 4.0),
+            "armature_distribution_params": (0.25, 4.0),
+            "operation": "scale",
+            "distribution": "log_uniform",
+        },
+    )
+
+    randomize_gripper_actuator_parameters = EventTerm(
+        func=task_mdp.randomize_actuator_gains,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["finger_joint"]),
+            "stiffness_distribution_params": (0.5, 2.0),
+            "damping_distribution_params": (0.5, 2.0),
+            "operation": "scale",
+            "distribution": "log_uniform",
+        },
+    )
+
+    reset_everything = EventTerm(func=task_mdp.reset_scene_to_default, mode="reset", params={})
+
+    reset_from_reset_states = EventTerm(
+        func=task_mdp.MultiResetManager,
+        mode="reset",
+        params={
+            "base_paths": [
+                f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/Resets/ObjectPairs/ObjectAnywhereEEAnywhere",
+            ],
+            "probs": [1.0],
+            "success": "env.reward_manager.get_term_cfg('progress_context').func.success",
+        },
+    )
+
+    fix_base_joint = EventTerm(
+        func=task_mdp.fix_joint_positions,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "fixed_positions": {0: 0.0},
+        },
+    )
+
+
+@configclass
 class CommandsCfg:
     """Command specifications for the MDP."""
 
@@ -707,5 +759,30 @@ class Ur5eRobotiq2f85RelJointPosEvalCfg(Ur5eRobotiq2f85RlStateCfg):
                 "damping_distribution_params": (0.5, 2.0),
                 "operation": "scale",
                 "distribution": "log_uniform",
+            },
+        )
+
+
+# Collection configurations (minimal randomization)
+@configclass
+class Ur5eRobotiq2f85RelCartesianOSCCollectCfg(Ur5eRobotiq2f85RlStateCfg):
+    """Collection configuration for expert data -- no dynamics randomization."""
+
+    events: CollectEventCfg = CollectEventCfg()
+    actions: Ur5eRobotiq2f85RelativeOSCAction = Ur5eRobotiq2f85RelativeOSCAction()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.robot = EXPLICIT_UR5E_ROBOTIQ_2F85.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+        self.events.randomize_robot_actuator_parameters = EventTerm(
+            func=task_mdp.randomize_operational_space_controller_gains,
+            mode="reset",
+            params={
+                "action_name": "arm",
+                "stiffness_distribution_params": (0.7, 1.3),
+                "damping_distribution_params": (0.9, 1.1),
+                "operation": "scale",
+                "distribution": "uniform",
             },
         )

@@ -1120,6 +1120,34 @@ def sample_from_nested_dict(nested_dict: dict, idx) -> dict:
     return sampled_dict
 
 
+def fix_joint_positions(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg,
+    fixed_positions: dict[int, float] | None = None,
+) -> None:
+    """Override specific joint positions to fixed values after a scene reset.
+
+    Args:
+        env: The environment instance.
+        env_ids: The environment ids to apply the fix to.
+        asset_cfg: The asset configuration (e.g. robot).
+        fixed_positions: Dict mapping joint index to fixed position value.
+    """
+    if fixed_positions is None:
+        return
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_pos = asset.data.joint_pos[env_ids].clone()
+    for joint_idx, value in fixed_positions.items():
+        joint_pos[:, joint_idx] = value
+    asset.write_joint_state_to_sim(
+        position=joint_pos,
+        velocity=torch.zeros_like(asset.data.joint_vel[env_ids]),
+        joint_ids=None,
+        env_ids=env_ids,
+    )
+
+
 class reset_root_states_uniform(ManagerTermBase):
     """Reset multiple assets' root states to random positions and velocities uniformly within given ranges.
 

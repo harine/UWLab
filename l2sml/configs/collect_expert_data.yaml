@@ -1,4 +1,4 @@
-task: "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0"
+task: "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Collect-v0"
 agent: "rsl_rl_cfg_entry_point"
 checkpoint: "peg_state_rl_expert.pt"
 output_dir: "data/peg_expert"
@@ -7,6 +7,7 @@ horizon: 800
 num_envs: 10
 seed: 0
 save_every: 25
+action_noise_std: 0.0
 disable_fabric: false
 headless: true
 capture_rendered_images: false
