@@ -93,14 +93,13 @@ parser.add_argument(
 )
 parser.add_argument("--use_ema", action="store_true", default=True)
 parser.add_argument("--no_ema", dest="use_ema", action="store_false")
-parser.add_argument("--verbose", action="store_true", default=False, help="Print debug info during rollouts.")
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False,
     help="Disable fabric and use USD I/O operations.",
 )
 AppLauncher.add_app_launcher_args(parser)
-parser.set_defaults(headless=True)
+parser.set_defaults(headless=False)
 
 args_cli, remaining_args = parser.parse_known_args()
 

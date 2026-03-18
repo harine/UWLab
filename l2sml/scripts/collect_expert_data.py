@@ -43,6 +43,12 @@ def _build_parser(config: dict[str, Any]) -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=int(config.get("seed", 0)))
     parser.add_argument("--save_every", type=int, default=int(config.get("save_every", 50)))
     parser.add_argument(
+        "--action_noise_std",
+        type=float,
+        default=float(config.get("action_noise_std", 0.0)),
+        help="Std-dev of zero-mean Gaussian noise added to expert actions before env.step().",
+    )
+    parser.add_argument(
         "--proprio_keys",
         nargs="*",
         default=list(config.get("proprio_keys", ["prev_actions", "joint_pos", "end_effector_pose"])),
@@ -211,6 +217,17 @@ def _resolve_checkpoint_path(agent_cfg: RslRlBaseRunnerCfg) -> str:
     return get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
 
+def _add_action_noise(
+    action: torch.Tensor, noise_std: float, clip_actions: float | None = None
+) -> torch.Tensor:
+    if noise_std <= 0.0:
+        return action
+    noisy_action = action + torch.randn_like(action) * noise_std
+    if clip_actions is not None:
+        noisy_action = torch.clamp(noisy_action, -clip_actions, clip_actions)
+    return noisy_action
+
+
 def _make_env_from_cfg(
     env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg,
     *,
@@ -349,6 +366,8 @@ def _save_trajectory(
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg) -> None:
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    if args_cli.action_noise_std < 0.0:
+        raise ValueError(f"--action_noise_std must be >= 0.0, got {args_cli.action_noise_std}.")
     num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.scene.num_envs = num_envs
     env_cfg.seed = args_cli.seed
@@ -389,6 +408,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "horizon": args_cli.horizon,
         "num_envs": num_envs,
         "seed": args_cli.seed,
+        "action_noise_std": args_cli.action_noise_std,
         "files": [],
     }
 
@@ -418,6 +438,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             with torch.inference_mode():
                 action = policy(obs)
+                action = _add_action_noise(action, args_cli.action_noise_std, agent_cfg.clip_actions)
 
             obs, rew, dones, extras = env.step(action)
             time_outs = extras.get("time_outs", torch.zeros_like(dones))
