@@ -135,7 +135,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
 
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
-    env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_ALL
+    env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
     env_cfg.recorders.dataset_file_handler_class_type = dataset_handler
 
     # override configurations with non-hydra CLI arguments
@@ -169,12 +169,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
     with contextlib.suppress(KeyboardInterrupt) and torch.inference_mode():
         # Initialize tqdm progress bar if num_demos > 0
         pbar = tqdm(total=args_cli.num_demos, desc="Recording Demonstrations", unit="demo")
-        noise = torch.randn((args_cli.num_envs,env.num_actions), device=env.device) * args_cli.action_std
+        # noise = torch.randn((args_cli.num_envs,env.num_actions), device=env.device) * args_cli.action_std
         while True:
             # agent stepping
             expert_policy_obs = env.get_observations()
             with torch.inference_mode():
-                actions = expert_policy(expert_policy_obs) + noise
+                actions = expert_policy(expert_policy_obs) # + noise
 
             # Mask actions to zero for environments in their first step after reset since first image may not be valid
             first_step_mask = (env.unwrapped.episode_length_buf == 0)
