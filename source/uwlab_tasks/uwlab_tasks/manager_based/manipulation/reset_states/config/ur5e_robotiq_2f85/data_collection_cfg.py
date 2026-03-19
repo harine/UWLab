@@ -4,6 +4,7 @@ from isaaclab.sensors import TiledCameraCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.managers import SceneEntityCfg
 import isaaclab.sim as sim_utils
 from uwlab_assets import UWLAB_CLOUD_ASSETS_DIR
@@ -68,6 +69,16 @@ class DataCollectionRGBSceneCfg(RlStateSceneCfg):
             focal_length=24.55
         )
     )
+
+@configclass
+class TerminationsCfg:
+    """Termination terms for the MDP."""
+
+    time_out = DoneTerm(func=task_mdp.time_out, time_out=True)
+
+    abnormal_robot = DoneTerm(func=task_mdp.abnormal_robot_state)
+
+    success = DoneTerm(func=task_mdp.consecutive_success_state_with_min_length, params={"num_consecutive_successes": 5, "min_episode_length": 10})
 
 @configclass
 class DataCollectionObservationsCfg(ObservationsCfg):
@@ -221,6 +232,7 @@ class DataCollectionCfg(Ur5eRobotiq2f85RlStateCfg):
     events: EventCfg = EventCfg()
     observations: DataCollectionObservationsCfg = DataCollectionObservationsCfg()
     actions: Ur5eRobotiq2f85RelativeOSCAction = Ur5eRobotiq2f85RelativeOSCAction()
+    terminations: TerminationsCfg = TerminationsCfg()
     # viewer: ViewerCfg = ViewerCfg(eye=(2.0, 0.0, 0.75), lookat=(0.0, 0.0, 0.0), origin_type="world", env_index=0, asset_name="robot")
     # variants = variants
 

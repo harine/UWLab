@@ -108,7 +108,6 @@ def process_agent_cfg(env_cfg, agent_cfg):
                     setattr(env_cfg.observations, "expert_obs", cfg)
     return agent_cfg
 
-
 @hydra_task_compose(args_cli.task, "rsl_rl_cfg_entry_point", hydra_args=remaining_args)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolicyRunnerCfg):
     """Collect demonstrations from the environment using RSL-RL policy."""
@@ -170,7 +169,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
         # Initialize tqdm progress bar if num_demos > 0
         pbar = tqdm(total=args_cli.num_demos, desc="Recording Demonstrations", unit="demo")
         # noise = torch.randn((args_cli.num_envs,env.num_actions), device=env.device) * args_cli.action_std
+        i = 0
         while True:
+            i += 1
             # agent stepping
             expert_policy_obs = env.get_observations()
             with torch.inference_mode():
@@ -189,7 +190,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
             env.step(actions)
 
             # print out the current demo count if it has changed
-            new_count = env.unwrapped.recorder_manager.exported_successful_episode_count + env.unwrapped.recorder_manager.exported_failed_episode_count
+            new_count = env.unwrapped.recorder_manager.exported_successful_episode_count #+ env.unwrapped.recorder_manager.exported_failed_episode_count
             if new_count > current_recorded_demo_count:
                 increment = new_count - current_recorded_demo_count
                 current_recorded_demo_count = new_count

@@ -35,3 +35,19 @@ def invalid_state(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Te
 def abnormal_robot_state(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     robot: Articulation = env.scene[asset_cfg.name]
     return (robot.data.joint_vel.abs() > (robot.data.joint_vel_limits * 2)).any(dim=1)
+
+def consecutive_success_state_with_min_length(
+    env: ManagerBasedRLEnv, num_consecutive_successes: int = 10, min_episode_length: int = 0
+):
+    """Like consecutive_success_state but rejects episodes shorter than min_episode_length.
+
+    Episodes that start already assembled will reach num_consecutive_successes quickly,
+    but won't be marked as success until min_episode_length steps have passed.
+    Combined with a separate early termination, these episodes get terminated as failures.
+    """
+    context_term = env.reward_manager.get_term_cfg("progress_context").func  # type: ignore
+    continuous_success_counter = getattr(context_term, "continuous_success_counter")
+    success = continuous_success_counter >= num_consecutive_successes
+    if min_episode_length > 0:
+        success = success & (env.episode_length_buf >= min_episode_length)
+    return success
