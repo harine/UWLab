@@ -1,3 +1,3 @@
-[submodule "/home/harine/UWLab/l2sml/diffusion_policy"]
-	path = /home/harine/UWLab/l2sml/diffusion_policy
+[submodule "l2sml/diffusion_policy"]
+	path = l2sml/diffusion_policy
 	url = git@github.com:sriyash421/diffusion_policy.git
