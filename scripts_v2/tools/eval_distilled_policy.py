@@ -109,7 +109,7 @@ def _capture_frame(obs_dict, env, env_idx: int, cam_keys: list, scene_cam_names:
     imgs = []
     if cam_keys:
         for cam in cam_keys:
-            img = obs_dict["policy"][cam][env_idx].detach().cpu().permute(1, 2, 0).numpy()
+            img = obs_dict["camera"][cam][env_idx].detach().cpu().permute(1, 2, 0).numpy()
             imgs.append((img * 255).clip(0, 255).astype("uint8"))
     elif scene_cam_names:
         for cam_name in scene_cam_names:
