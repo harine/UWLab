@@ -241,7 +241,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
                     for i in reset_ids:
                         frames_to_save.extend(env_frames[i])
                         env_frames[i] = []
-                    imageio.mimsave("policy_cameras.mp4", frames_to_save, fps=10, codec="libx264")
+                    imageio.mimsave("outputs/videos/policy_cameras.mp4", frames_to_save, fps=10, codec="libx264")
 
                 if pbar is not None:
                     pbar.update(len(new_ids))

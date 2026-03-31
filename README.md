@@ -50,3 +50,37 @@ See [all available environments](https://uw-lab.github.io/UWLab/main/source/over
 
 UW Lab is released under [BSD-3 License](LICENSE)
 The Isaac Lab framework is released under [BSD-3 License](LICENSE).
+
+## Sidharth Commands
+Collect Data
+```
+python scripts_v2/tools/collect_demos.py \
+--task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-DataCollection-v0 \
+--dataset_file datasets/peg/state0.zarr \
+--num_envs 2048 \
+--num_demos 10000 \
+--headless \
+env.scene.insertive_object=peg \
+env.scene.receptive_object=peghole \
+agent.algorithm.offline_algorithm_cfg.behavior_cloning_cfg.experts_path='["expert_policies/exported/policy.pt"]'
+```
+Train State Based
+```
+python train.py  \
+--config-name train_mlp_sim2real_state_workspace.yaml \
+--config-dir diffusion_policy/config \
+task.dataset.dataset_dir=/home/sriyash/projects/UWLab/datasets/peg
+```
+Eval State Based
+```
+python scripts_v2/tools/eval_distilled_policy.py \
+--task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0 \
+--checkpoint <chackpoint path> \
+--num_envs 32 \
+--num_trajectories 100 \
+--headless \
+--enable_cameras \
+--save_video \
+env.scene.insertive_object=peg \
+env.scene.receptive_object=peghole 
+```
