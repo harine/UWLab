@@ -158,11 +158,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
 
     # simulate environment -- run everything in inference mode
     current_recorded_demo_count = 0
+    env_step_count = 0
     with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
         # Initialize tqdm progress bar if num_demos > 0
         pbar = tqdm(total=args_cli.num_demos, desc="Recording Demonstrations", unit="demo")
 
         while True:
+
             # agent stepping
             expert_policy_obs = expert_obs_fn(env)
             mean, std = expert_policy.compute_distribution(expert_policy_obs)
@@ -180,6 +182,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
 
             # env stepping
             env.step(actions)
+            env_step_count += 1
 
             # print out the current demo count if it has changed
             new_count = env.unwrapped.recorder_manager.exported_successful_episode_count
@@ -187,6 +190,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
                 increment = new_count - current_recorded_demo_count
                 current_recorded_demo_count = new_count
                 pbar.update(increment)
+
+            pbar.set_postfix(demos=current_recorded_demo_count, steps=env_step_count)
 
             if args_cli.num_demos > 0 and new_count >= args_cli.num_demos:
                 print(f"All {args_cli.num_demos} demonstrations recorded. Exiting the app.")

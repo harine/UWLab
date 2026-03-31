@@ -71,3 +71,8 @@ tests/
 
 # Docker history
 .uw-lab-docker-history
+
+# Cursor and VSCode
+.cursor/
+data/
+.vscode

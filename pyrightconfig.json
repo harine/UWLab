@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/pyright/main/packages/vscode-pyright/schemas/pyrightconfig.schema.json",
+  "typeCheckingMode": "basic",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "source/uwlab_assets",
+        "source/uwlab",
+        "source/uwlab_rl",
+        "source/uwlab_tasks",
+        "_isaaclab/IsaacLab/source/isaaclab",
+        "_isaaclab/IsaacLab/source/isaaclab_assets",
+        "_isaaclab/IsaacLab/source/isaaclab_contrib",
+        "_isaaclab/IsaacLab/source/isaaclab_mimic",
+        "_isaaclab/IsaacLab/source/isaaclab_rl",
+        "_isaaclab/IsaacLab/source/isaaclab_tasks"
+      ]
+    }
+  ]
+}
+
