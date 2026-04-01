@@ -33,6 +33,12 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
 parser.add_argument("--use_amp", action="store_true", default=False, help="Use automatic mixed precision.")
 parser.add_argument("--save_video", action="store_true", default=False, help="Save video of the policy.")
+parser.add_argument(
+    "--execute_horizon",
+    type=int,
+    default=None,
+    help="Number of actions to execute from each predicted chunk before replanning. Defaults to the full chunk.",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -87,6 +93,12 @@ def _load_policy(ckpt_path: str, device: torch.device, use_ema: bool = False) ->
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
     policy = workspace.ema_model if cfg.training.use_ema else workspace.model
     return policy.eval().to(device)
+
+
+def _get_policy_chunk_info(policy: BaseImagePolicy) -> tuple[int, int]:
+    n_obs_steps = int(getattr(policy, "n_obs_steps", 1))
+    n_action_steps = int(getattr(policy, "n_action_steps", 1))
+    return n_obs_steps, n_action_steps
 
 
 def _discover_cameras(obs_dict, env):
@@ -176,7 +188,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
 
     policy = _load_policy(args_cli.checkpoint, device)
-    wrapped_policy = DiffusionPolicyWrapper(policy, device, n_obs_steps=policy.n_obs_steps, num_envs=args_cli.num_envs)
+    n_obs_steps, n_action_steps = _get_policy_chunk_info(policy)
+    if args_cli.execute_horizon is not None and args_cli.execute_horizon < 1:
+        raise ValueError("--execute_horizon must be at least 1 when provided.")
+    execute_horizon = args_cli.execute_horizon
+    print(
+        f"Loaded policy `{policy.__class__.__name__}` "
+        f"with n_obs_steps={n_obs_steps}, n_action_steps={n_action_steps}."
+    )
+    if n_action_steps > 1:
+        if execute_horizon is None:
+            print("Action chunking enabled: full predicted chunks will be executed before replanning.")
+        else:
+            print(
+                "Action chunking enabled: "
+                f"executing the first {execute_horizon} actions from each predicted chunk before replanning."
+            )
+    wrapped_policy = DiffusionPolicyWrapper(
+        policy,
+        device,
+        n_obs_steps=n_obs_steps,
+        num_envs=args_cli.num_envs,
+        execute_horizon=execute_horizon,
+    )
 
     obs_dict, _ = env.reset()
     dones = torch.ones(args_cli.num_envs, dtype=torch.bool, device=device)

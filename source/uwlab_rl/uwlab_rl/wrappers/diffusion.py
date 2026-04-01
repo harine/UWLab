@@ -139,7 +139,14 @@ class ImageObservationHistory(ObservationHistoryManager):
 class DiffusionPolicyWrapper:
     """Wraps diffusion policy to handle Isaac Lab environment observations and action execution."""
 
-    def __init__(self, policy, device: torch.device, n_obs_steps: int = 2, num_envs: int = 1):
+    def __init__(
+        self,
+        policy,
+        device: torch.device,
+        n_obs_steps: int = 2,
+        num_envs: int = 1,
+        execute_horizon: int | None = None,
+    ):
         """Initialize the policy wrapper.
 
         Args:
@@ -155,6 +162,7 @@ class DiffusionPolicyWrapper:
         self.device = device
         self.n_obs_steps = n_obs_steps
         self.num_envs = num_envs
+        self.execute_horizon = execute_horizon
 
         # Initialize observation history manager based on policy type
         self.is_image_policy = self._is_image_policy()
@@ -313,6 +321,8 @@ class DiffusionPolicyWrapper:
             # Shape: (batch_size, action_chunk_len, action_dim)
             for i in range(action_chunk.shape[0]):
                 env_action_chunk = action_chunk[i]  # Shape: (action_chunk_len, action_dim)
+                if self.execute_horizon is not None:
+                    env_action_chunk = env_action_chunk[: self.execute_horizon]
                 action_chunks.append(env_action_chunk)
         else:
             # Single action case: (batch_size, action_dim) -> list of (1, action_dim) per env
