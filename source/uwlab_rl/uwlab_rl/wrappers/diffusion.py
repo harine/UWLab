@@ -180,7 +180,7 @@ class DiffusionPolicyWrapper:
     def _is_image_policy(self) -> bool:
         """Detect if this is an image policy based on class name."""
         policy_class_name = self.policy.__class__.__name__.lower()
-        image_policy_indicators = ["image", "hybrid", "video"]
+        image_policy_indicators = ["image", "hybrid", "video", "actionchunktransformer"]
         return any(indicator in policy_class_name for indicator in image_policy_indicators)
 
     def reset(self, reset_ids: torch.Tensor):

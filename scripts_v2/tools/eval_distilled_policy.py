@@ -184,6 +184,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
     env_cfg.sim.use_fabric = not args_cli.disable_fabric
     env_cfg.seed = args_cli.seed
     env_cfg.observations.policy.concatenate_terms = False
+    if not args_cli.save_video:
+        del env_cfg.scene.front_camera
+        del env_cfg.scene.side_camera
+        del env_cfg.scene.wrist_camera
+        del env_cfg.observations.camera
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
 
@@ -283,6 +288,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
                     pbar.set_description(f"Evaluating trajectories (Success: {rate:.2f}%)")
 
     _print_results(episodes, successful_episodes, episode_metrics)
+    print(f"Successful episodes: {successful_episodes}", flush=True)
     if pbar is not None:
         pbar.close()
     env.close()
