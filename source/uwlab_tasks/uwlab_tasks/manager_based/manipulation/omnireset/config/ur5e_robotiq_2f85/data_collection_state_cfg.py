@@ -91,6 +91,17 @@ class StateObservationsCfg:
             },
         )
 
+        # Privileged observations
+        joint_vel = ObsTerm(func=task_mdp.joint_vel)
+
+        end_effector_vel_lin_ang_b = ObsTerm(
+            func=task_mdp.asset_link_velocity_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
         def __post_init__(self):
             self.enable_corruption = True
             self.concatenate_terms = False
@@ -165,6 +176,17 @@ class StateObservationsCfg:
                 "rotation_repr": "axis_angle",
             },
         )
+
+        joint_vel = ObsTerm(func=task_mdp.joint_vel)
+
+        end_effector_vel_lin_ang_b = ObsTerm(
+            func=task_mdp.asset_link_velocity_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
 
         def __post_init__(self):
             self.enable_corruption = True
