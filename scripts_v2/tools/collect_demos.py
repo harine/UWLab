@@ -33,6 +33,8 @@ parser.add_argument(
     default=False,
     help="Use the mean of the policy distribution instead of sampling.",
 )
+parser.add_argument("--action_std", type=float, default=0.0, help="Threshold for action std.")
+parser.add_argument("--collect_failed_demos", action="store_true", default=False, help="Collect failed demos.")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -127,7 +129,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
 
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
-    env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
+    if args_cli.collect_failed_demos:
+        env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_ALL
+    else:
+        env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
     env_cfg.recorders.dataset_file_handler_class_type = dataset_handler
 
     # override configurations with non-hydra CLI arguments
@@ -180,18 +185,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg: RslRlOnPolic
             env.unwrapped.obs_buf["data_collection"]["expert_action_mean"] = mean.clone()
             env.unwrapped.obs_buf["data_collection"]["expert_action_std"] = std.clone()
 
+            if args_cli.action_std > 0.0:
+                noise = torch.randn_like(actions) * args_cli.action_std
+                actions = actions + noise
+
             # env stepping
             env.step(actions)
             env_step_count += 1
 
             # print out the current demo count if it has changed
-            new_count = env.unwrapped.recorder_manager.exported_successful_episode_count
+            if args_cli.collect_failed_demos:
+                new_count = env.unwrapped.recorder_manager.exported_successful_episode_count + env.unwrapped.recorder_manager.exported_failed_episode_count
+            else:
+                new_count = env.unwrapped.recorder_manager.exported_successful_episode_count
             if new_count > current_recorded_demo_count:
                 increment = new_count - current_recorded_demo_count
                 current_recorded_demo_count = new_count
                 pbar.update(increment)
 
-            pbar.set_postfix(demos=current_recorded_demo_count, steps=env_step_count)
+            pbar.set_postfix(demos=current_recorded_demo_count, steps=env_step_count, successful_demos=env.unwrapped.recorder_manager.exported_successful_episode_count)
 
             if args_cli.num_demos > 0 and new_count >= args_cli.num_demos:
                 print(f"All {args_cli.num_demos} demonstrations recorded. Exiting the app.")

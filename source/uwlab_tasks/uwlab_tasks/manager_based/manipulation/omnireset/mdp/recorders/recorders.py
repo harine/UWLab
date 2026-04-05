@@ -84,3 +84,11 @@ class PreStepDataCollectionObservationsRecorder(RecorderTerm):
     def record_pre_step(self):
         """Record data collection observations from the data_collection observation group."""
         return "obs", self._env.obs_buf["data_collection"]
+
+
+class RewardDataRecorder(RecorderTerm):
+    """Recorder term that records the environment reward after each step."""
+
+    def record_post_step(self):
+        """Record the scalar reward buffer for each environment."""
+        return "rewards", self._env.reward_buf

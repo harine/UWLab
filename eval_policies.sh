@@ -5,7 +5,7 @@ set -euo pipefail
 HORIZONS=(8 4 2 1)
 
 # Directory for logs
-LOG_DIR="outputs/evals"
+LOG_DIR="outputs/evals/transformer"
 mkdir -p "$LOG_DIR"
 
 # Optional run identifier so files from different runs do not collide
@@ -19,7 +19,7 @@ for H in "${HORIZONS[@]}"; do
 
     python scripts_v2/tools/eval_distilled_policy.py \
         --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0 \
-        --checkpoint diffusion_policy/data/outputs/2026.04.02/16.04.51_train_transformer_image_aux_sim2real_state_privledged/checkpoints/step_0100000.ckpt \
+        --checkpoint diffusion_policy/data/outputs/2026.04.02/16.04.51_train_transformer_image_aux_sim2real_state_privledged/checkpoints/step_0200000.ckpt \
         --num_envs 32 \
         --num_trajectories 100 \
         --headless \

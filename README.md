@@ -52,7 +52,7 @@ UW Lab is released under [BSD-3 License](LICENSE)
 The Isaac Lab framework is released under [BSD-3 License](LICENSE).
 
 ## Sidharth Commands
-Collect Data
+### Collect Data
 ```
 python scripts_v2/tools/collect_demos.py \
 --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-DataCollection-v0 \
@@ -64,14 +64,15 @@ env.scene.insertive_object=peg \
 env.scene.receptive_object=peghole \
 agent.algorithm.offline_algorithm_cfg.behavior_cloning_cfg.experts_path='["expert_policies/exported/policy.pt"]'
 ```
-Train State Based
+If training a Q function add set --action_std 3.0 and --collect_failed_demos
+### Train State Based
 ```
 python train.py  \
 --config-name train_mlp_sim2real_state_workspace.yaml \
 --config-dir diffusion_policy/config \
 task.dataset.dataset_dir=/home/sriyash/projects/UWLab/datasets/peg
 ```
-Eval State Based
+### Eval State Based
 ```
 python scripts_v2/tools/eval_distilled_policy.py \
 --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0 \

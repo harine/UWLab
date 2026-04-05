@@ -79,6 +79,13 @@ class PreStepDataCollectionObservationsRecorderCfg(RecorderTermCfg):
 
 
 @configclass
+class RewardDataRecorderCfg(RecorderTermCfg):
+    """Configuration for the reward recorder term."""
+
+    class_type: type[RecorderTerm] = recorders.RewardDataRecorder
+
+
+@configclass
 class ActionStateRecorderManagerCfg(RecorderManagerBaseCfg):
     """Recorder manager that records raw actions and observations for data collection."""
 
@@ -86,3 +93,4 @@ class ActionStateRecorderManagerCfg(RecorderManagerBaseCfg):
     record_post_step_states = PostStepStatesRecorderCfg()
     record_pre_step_actions = PreStepActionsRecorderCfg()
     record_pre_step_data_collection_observations = PreStepDataCollectionObservationsRecorderCfg()
+    record_post_step_rewards = RewardDataRecorderCfg()
