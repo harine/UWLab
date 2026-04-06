@@ -34,6 +34,12 @@ parser.add_argument("--seed", type=int, default=42, help="Random seed for reprod
 parser.add_argument("--use_amp", action="store_true", default=False, help="Use automatic mixed precision.")
 parser.add_argument("--save_video", action="store_true", default=False, help="Save video of the policy.")
 parser.add_argument(
+    "--use_absolute",
+    action="store_true",
+    default=False,
+    help="Use the latest end-effector pose observation to convert absolute policy actions into environment actions.",
+)
+parser.add_argument(
     "--execute_horizon",
     type=int,
     default=None,
@@ -92,6 +98,7 @@ def _load_policy(ckpt_path: str, device: torch.device, use_ema: bool = False) ->
     workspace: BaseWorkspace
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
     policy = workspace.ema_model if cfg.training.use_ema else workspace.model
+    policy.abs_action = bool(getattr(getattr(cfg.task, "dataset", {}), "abs_action", False))
     return policy.eval().to(device)
 
 
@@ -215,6 +222,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
         n_obs_steps=n_obs_steps,
         num_envs=args_cli.num_envs,
         execute_horizon=execute_horizon,
+        use_absolute_actions=args_cli.use_absolute,
     )
 
     obs_dict, _ = env.reset()
@@ -268,6 +276,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
                 episodes += 1
             else:
                 new_ids = []
+
+            if pbar is not None:
+                pbar.set_postfix(steps=steps)
 
             if isinstance(dones, torch.Tensor) and dones.any():
                 reset_ids = (dones > 0).nonzero(as_tuple=False).reshape(-1)

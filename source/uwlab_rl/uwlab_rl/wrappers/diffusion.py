@@ -7,6 +7,8 @@ import torch
 from abc import ABC, abstractmethod
 from typing import Any
 
+from uwlab_rl.wrappers.utils import inverse_process_actions, pose_axis_angle_to_pos_quat
+
 
 class ObservationHistoryManager(ABC):
     """Abstract base class for managing observation history."""
@@ -146,6 +148,7 @@ class DiffusionPolicyWrapper:
         n_obs_steps: int = 2,
         num_envs: int = 1,
         execute_horizon: int | None = None,
+        use_absolute_actions: bool = False,
     ):
         """Initialize the policy wrapper.
 
@@ -157,12 +160,17 @@ class DiffusionPolicyWrapper:
             execute_horizon: Number of actions to execute from each chunk before
                 replanning. None = execute full chunk (open-loop). 1 = replan
                 every step (receding horizon).
+            use_absolute_actions: Whether to use the latest end-effector pose
+                observation to convert absolute policy actions back into
+                relative environment actions.
         """
         self.policy = policy
         self.device = device
         self.n_obs_steps = n_obs_steps
         self.num_envs = num_envs
         self.execute_horizon = execute_horizon
+        self.use_absolute_actions = use_absolute_actions
+        self.absolute_actions = bool(getattr(policy, "abs_action", False))
 
         # Initialize observation history manager based on policy type
         self.is_image_policy = self._is_image_policy()
@@ -208,6 +216,9 @@ class DiffusionPolicyWrapper:
         """
         # Process observations to format expected by diffusion policy
         processed_obs = self._process_obs(obs_dict)
+        latest_ee_pose = None
+        if self.use_absolute_actions and self.absolute_actions:
+            latest_ee_pose = self._extract_latest_end_effector_pose(obs_dict)
 
         # Update observation history with batched operations
         self.obs_history_manager.update(processed_obs)
@@ -227,6 +238,9 @@ class DiffusionPolicyWrapper:
         actions = torch.zeros(self.num_envs, self.action_queue[0][0].shape[-1], device=self.device, dtype=torch.float32)
         for i in range(self.num_envs):
             actions[i] = self.action_queue[i].pop(0)
+
+        if latest_ee_pose is not None:
+            actions = self._convert_absolute_actions(actions, latest_ee_pose)
 
         return actions
 
@@ -332,3 +346,60 @@ class DiffusionPolicyWrapper:
                 action_chunks.append(action_chunk[i].unsqueeze(0))
 
         return action_chunks
+
+    def _extract_latest_end_effector_pose(self, obs_dict: dict[str, Any]) -> torch.Tensor:
+        """Extract the latest end-effector pose from the current observation."""
+        obs = obs_dict.get("policy", obs_dict) if isinstance(obs_dict, dict) else obs_dict
+        if not isinstance(obs, dict) or "end_effector_pose" not in obs:
+            raise KeyError("Absolute-action conversion requires `end_effector_pose` in the latest policy observation.")
+
+        ee_pose = obs["end_effector_pose"]
+        if isinstance(ee_pose, torch.Tensor):
+            ee_pose_tensor = ee_pose.to(self.device)
+        else:
+            ee_pose_tensor = torch.tensor(ee_pose, device=self.device)
+
+        if ee_pose_tensor.ndim == 1:
+            ee_pose_tensor = ee_pose_tensor.unsqueeze(0)
+        if ee_pose_tensor.shape[-1] != 6:
+            raise ValueError(
+                f"Expected `end_effector_pose` to have shape (..., 6), got {tuple(ee_pose_tensor.shape)}."
+            )
+        return ee_pose_tensor
+
+    def _convert_absolute_actions(self, action_chunk: torch.Tensor, latest_ee_pose: torch.Tensor) -> torch.Tensor:
+        """Convert absolute EE targets into relative environment actions."""
+        if action_chunk.shape[-1] < 7:
+            raise ValueError(
+                "Absolute-action conversion expects actions with at least 7 dimensions "
+                "(xyz + quat + optional extras)."
+            )
+
+        is_single_step = action_chunk.ndim == 2
+        if is_single_step:
+            action_chunk = action_chunk.unsqueeze(1)
+
+        batch_size, horizon, _ = action_chunk.shape
+        if latest_ee_pose.shape[0] != batch_size:
+            raise ValueError(
+                "Latest end-effector pose batch does not match action batch: "
+                f"{latest_ee_pose.shape[0]} vs {batch_size}."
+            )
+
+        ref_pos, ref_quat = pose_axis_angle_to_pos_quat(latest_ee_pose)
+        ref_pos = ref_pos.unsqueeze(1).expand(-1, horizon, -1).reshape(batch_size * horizon, 3)
+        ref_quat = ref_quat.unsqueeze(1).expand(-1, horizon, -1).reshape(batch_size * horizon, 4)
+
+        ee_pos_des = action_chunk[..., :3].reshape(batch_size * horizon, 3)
+        ee_quat_des = action_chunk[..., 3:7].reshape(batch_size * horizon, 4)
+        relative_pose_actions = inverse_process_actions(
+            ee_pos_des,
+            ee_quat_des,
+            ref_pos,
+            ref_quat,
+        ).reshape(batch_size, horizon, 6)
+
+        converted_actions = torch.cat([relative_pose_actions, action_chunk[..., 7:]], dim=-1)
+        if is_single_step:
+            converted_actions = converted_actions.squeeze(1)
+        return converted_actions

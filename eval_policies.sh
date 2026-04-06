@@ -19,13 +19,14 @@ for H in "${HORIZONS[@]}"; do
 
     python scripts_v2/tools/eval_distilled_policy.py \
         --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0 \
-        --checkpoint diffusion_policy/data/outputs/2026.04.02/16.04.51_train_transformer_image_aux_sim2real_state_privledged/checkpoints/step_0200000.ckpt \
+        --checkpoint diffusion_policy/data/outputs/2026.04.05/13.15.24_train_transformer_image_aux_sim2real_state_privledged/checkpoints/step_0200000.ckpt \
         --num_envs 32 \
         --num_trajectories 100 \
         --headless \
         env.scene.insertive_object=peg \
         env.scene.receptive_object=peghole \
         --execute_horizon "$H" \
+        --use_absolute \
         > "$OUT_FILE" 2>&1
 done
 

@@ -80,8 +80,7 @@ python scripts_v2/tools/eval_distilled_policy.py \
 --num_envs 32 \
 --num_trajectories 100 \
 --headless \
---enable_cameras \
---save_video \
 env.scene.insertive_object=peg \
 env.scene.receptive_object=peghole 
 ```
+add `--save_video` and `--enable_cameras` if you would like to record video
