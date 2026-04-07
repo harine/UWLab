@@ -76,7 +76,7 @@ task.dataset.dataset_dir=/home/sriyash/projects/UWLab/datasets/peg
 ```
 python scripts_v2/tools/eval_distilled_policy.py \
 --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0 \
---checkpoint <chackpoint path> \
+--checkpoint <checkpoint path> \
 --num_envs 32 \
 --num_trajectories 100 \
 --headless \

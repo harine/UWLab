@@ -233,7 +233,124 @@ class EvalStateObservationsCfg(StateObservationsCfg):
         def __post_init__(self):
             self.enable_corruption = True
             self.concatenate_terms = False
+
+    @configclass
+    class StateDataCollectionCfg(ObsGroup):
+        """Observations for data collection group (with unprocessed images for saving)."""
+        front_rgb = ObsTerm(
+            func=task_mdp.process_image,
+            params={
+                "sensor_cfg": SceneEntityCfg("front_camera"),
+                "data_type": "rgb",
+                "process_image": False,
+                "output_size": (224, 224),
+            },
+        )
+
+        side_rgb = ObsTerm(
+            func=task_mdp.process_image,
+            params={
+                "sensor_cfg": SceneEntityCfg("side_camera"),
+                "data_type": "rgb",
+                "process_image": False,
+                "output_size": (224, 224),
+            },
+        )
+
+        wrist_rgb = ObsTerm(
+            func=task_mdp.process_image,
+            params={
+                "sensor_cfg": SceneEntityCfg("wrist_camera"),
+                "data_type": "rgb",
+                "process_image": False,
+                "output_size": (224, 224),
+            },
+        )
+        last_gripper_action = ObsTerm(
+            func=task_mdp.last_action,
+            params={
+                "action_name": "gripper",
+            },
+        )
+
+        last_arm_action = ObsTerm(
+            func=task_mdp.last_action,
+            params={
+                "action_name": "arm",
+            },
+        )
+
+        arm_joint_pos = ObsTerm(
+            func=task_mdp.joint_pos,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=["shoulder.*", "elbow.*", "wrist.*"]),
+            },
+        )
+
+        end_effector_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        # Additional observations
+        binary_contact = ObsTerm(
+            func=task_mdp.binary_force_contact,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "body_name": "wrist_3_link",
+                "force_threshold": 25.0,
+            },
+        )
+
+        insertive_asset_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("insertive_object"),
+                "root_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        receptive_asset_pose = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("receptive_object"),
+                "root_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        insertive_asset_in_receptive_asset_frame: ObsTerm = ObsTerm(
+            func=task_mdp.target_asset_pose_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("insertive_object"),
+                "root_asset_cfg": SceneEntityCfg("receptive_object"),
+                "rotation_repr": "axis_angle",
+            },
+        )
+
+        joint_vel = ObsTerm(func=task_mdp.joint_vel)
+
+        end_effector_vel_lin_ang_b = ObsTerm(
+            func=task_mdp.asset_link_velocity_in_root_asset_frame,
+            params={
+                "target_asset_cfg": SceneEntityCfg("robot", body_names="wrist_3_link"),
+                "root_asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+
+
+        def __post_init__(self):
+            self.enable_corruption = True
+            self.concatenate_terms = False
+        
+
     camera: CameraObservationsCfg = CameraObservationsCfg()
+    data_collection: StateDataCollectionCfg = StateDataCollectionCfg()
 
 @configclass 
 class StateCommandsCfg:
