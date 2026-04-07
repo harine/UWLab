@@ -1,10 +1,10 @@
 task: "OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Collect-v0"
 agent: "rsl_rl_cfg_entry_point"
 checkpoint: "peg_state_rl_expert.pt"
-output_dir: "data/peg_expert"
-num_trajectories: 1000
+output_dir: "data/peg_expert_state"
+num_trajectories: 10000
 horizon: 800
-num_envs: 10
+num_envs: 1024
 seed: 0
 save_every: 25
 action_noise_std: 0.0

@@ -94,6 +94,23 @@ parser.add_argument(
 parser.add_argument("--use_ema", action="store_true", default=True)
 parser.add_argument("--no_ema", dest="use_ema", action="store_false")
 parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--video", action="store_true", default=False, help="Record videos of rollouts.")
+parser.add_argument(
+    "--policy_type", type=str, default="auto", choices=["auto", "diffusion", "mlp"],
+    help="Policy type: 'auto' detects from checkpoint, 'diffusion' for UNet, 'mlp' for MLPLowdimPolicy.",
+)
+parser.add_argument(
+    "--sim_to_policy_key_map", nargs="*",
+    default=[
+        "joint_pos=arm_joint_pos:6",
+        "prev_actions=last_arm_action:6,last_gripper_action:1",
+        "end_effector_pose=end_effector_pose",
+        "insertive_asset_pose=insertive_asset_pose",
+        "receptive_asset_pose=receptive_asset_pose",
+        "insertive_asset_in_receptive_asset_frame=insertive_asset_in_receptive_asset_frame",
+    ],
+    help="Sim obs term to policy key mapping.  Format: sim_key=policy_key[:dim][,policy_key2[:dim2]]",
+)
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False,
     help="Disable fabric and use USD I/O operations.",
@@ -102,6 +119,8 @@ AppLauncher.add_app_launcher_args(parser)
 parser.set_defaults(headless=False)
 
 args_cli, remaining_args = parser.parse_known_args()
+if args_cli.video:
+    args_cli.enable_cameras = True
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -403,6 +422,48 @@ def _apply_normalizer(
 
 
 # ===================================================================
+# Inline MLP policy (mirrors diffusion_policy MLPLowdimPolicy)
+# ===================================================================
+
+class InlineMLP(nn.Module):
+    """Gaussian MLP with trunk + mean_head (only mean used at inference)."""
+
+    def __init__(self, input_dim: int, action_dim: int,
+                 hidden_dim: int = 512, hidden_depth: int = 4):
+        super().__init__()
+        layers: list[nn.Module] = []
+        last_dim = input_dim
+        for _ in range(hidden_depth):
+            layers += [nn.Linear(last_dim, hidden_dim), nn.ReLU()]
+            last_dim = hidden_dim
+        self.trunk = nn.Sequential(*layers)
+        self.mean_head = nn.Linear(last_dim, action_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mean_head(self.trunk(x))
+
+
+def _parse_key_map(raw_entries: list[str]) -> dict[str, list[tuple[str, int | None]]]:
+    """Parse --sim_to_policy_key_map entries.
+
+    Each entry: ``sim_key=policy_key[:dim][,policy_key2[:dim2]]``
+    Returns ``{sim_key: [(policy_key, dim_or_None), ...]}``.
+    """
+    mapping: dict[str, list[tuple[str, int | None]]] = {}
+    for entry in raw_entries:
+        sim_key, _, rhs = entry.partition("=")
+        targets: list[tuple[str, int | None]] = []
+        for part in rhs.split(","):
+            if ":" in part:
+                pkey, dim_str = part.rsplit(":", 1)
+                targets.append((pkey, int(dim_str)))
+            else:
+                targets.append((part, None))
+        mapping[sim_key] = targets
+    return mapping
+
+
+# ===================================================================
 # Checkpoint loading
 # ===================================================================
 
@@ -512,6 +573,88 @@ def load_checkpoint(ckpt_path: str, device: torch.device, use_ema: bool = True):
     return unet, scheduler, norm_params, pcfg
 
 
+def detect_policy_type(ckpt_path: str) -> str:
+    """Return 'mlp' or 'diffusion' based on checkpoint contents."""
+    payload = torch.load(open(ckpt_path, "rb"), pickle_module=dill, weights_only=False)
+    cfg = _resolve_cfg(payload["cfg"])
+    name = cfg.get("name", "")
+    target = _get(cfg, "_target_", default="")
+    if "mlp" in name.lower() or "mlp" in target.lower():
+        return "mlp"
+    return "diffusion"
+
+
+def load_mlp_checkpoint(
+    ckpt_path: str, device: torch.device, use_ema: bool = False,
+):
+    """Load a TrainMLPLowdimWorkspace checkpoint.
+
+    Returns ``(mlp, per_key_norm, action_norm, pcfg)`` where:
+    - *mlp* is the ``InlineMLP`` in eval mode on *device*.
+    - *per_key_norm* is ``{policy_key: {'scale', 'offset'}}``.
+    - *action_norm* is ``{'scale', 'offset'}``.
+    - *pcfg* is a plain dict with policy hyper-parameters.
+    """
+    payload = torch.load(
+        open(ckpt_path, "rb"), pickle_module=dill, weights_only=False,
+    )
+    cfg = _resolve_cfg(payload["cfg"])
+
+    shape_meta = _get(cfg, "task.shape_meta", "shape_meta")
+    obs_meta = shape_meta["obs"]
+    lowdim_keys = sorted([
+        k for k, v in obs_meta.items()
+        if v.get("type", "low_dim") == "low_dim"
+    ])
+    obs_key_dims = {k: obs_meta[k]["shape"][0] for k in lowdim_keys}
+    obs_feature_dim = sum(obs_key_dims.values())
+    action_dim = shape_meta["action"]["shape"][0]
+
+    n_obs_steps = int(_get(cfg, "n_obs_steps", "policy.n_obs_steps"))
+    n_action_steps = int(_get(cfg, "n_action_steps", "policy.n_action_steps"))
+    horizon = int(_get(cfg, "horizon", "policy.horizon"))
+    hidden_dim = int(_get(cfg, "policy.hidden_dim", default=512))
+    hidden_depth = int(_get(cfg, "policy.hidden_depth", default=4))
+
+    input_dim = obs_feature_dim * n_obs_steps
+    mlp = InlineMLP(input_dim, action_dim, hidden_dim, hidden_depth)
+
+    sd_key = "ema_model" if (use_ema and "ema_model" in payload["state_dicts"]) else "model"
+    full_sd = payload["state_dicts"][sd_key]
+    print(f"[INFO] Loading MLP weights from '{sd_key}' key.")
+
+    mlp_sd = {}
+    for k, v in full_sd.items():
+        for prefix in ("trunk.", "mean_head."):
+            if k.startswith(prefix):
+                mlp_sd[k] = v
+    mlp.load_state_dict(mlp_sd)
+    mlp.eval().to(device)
+
+    per_key_norm: dict[str, dict[str, torch.Tensor]] = {}
+    for key in lowdim_keys:
+        per_key_norm[key] = {
+            "scale": full_sd[f"normalizer.params_dict.{key}.scale"].to(device),
+            "offset": full_sd[f"normalizer.params_dict.{key}.offset"].to(device),
+        }
+    action_norm = {
+        "scale": full_sd["normalizer.params_dict.action.scale"].to(device),
+        "offset": full_sd["normalizer.params_dict.action.offset"].to(device),
+    }
+
+    pcfg = {
+        "obs_dim": obs_feature_dim,
+        "action_dim": action_dim,
+        "horizon": horizon,
+        "n_obs_steps": n_obs_steps,
+        "n_action_steps": n_action_steps,
+        "lowdim_keys": lowdim_keys,
+        "obs_key_dims": obs_key_dims,
+        "policy_type": "mlp",
+    }
+    return mlp, per_key_norm, action_norm, pcfg
+
+
 # ===================================================================
 # Diffusion inference
 # ===================================================================
@@ -589,6 +732,74 @@ def predict_action(
     start = To - 1 if pcfg["oa_step_convention"] else To
     end = start + pcfg["n_action_steps"]
     return action_pred[:, start:end]
+
+
+# ===================================================================
+# MLP inference
+# ===================================================================
+
+@torch.no_grad()
+def predict_action_mlp(
+    mlp: InlineMLP,
+    per_key_norm: dict[str, dict[str, torch.Tensor]],
+    action_norm: dict[str, torch.Tensor],
+    pcfg: dict[str, Any],
+    obs_dict_seq: dict[str, torch.Tensor],
+    device: torch.device,
+) -> torch.Tensor:
+    """Run one MLP inference step.
+
+    Args:
+        obs_dict_seq: ``{policy_key: (B, n_obs_steps, key_dim)}`` on *device*.
+
+    Returns:
+        ``(B, 1, action_dim)`` un-normalised actions.
+    """
+    lowdim_keys = pcfg["lowdim_keys"]
+    To = pcfg["n_obs_steps"]
+    B = next(iter(obs_dict_seq.values())).shape[0]
+
+    parts = []
+    for key in lowdim_keys:
+        x = obs_dict_seq[key][:, :To]
+        nx = _apply_normalizer(
+            x, per_key_norm[key]["scale"], per_key_norm[key]["offset"],
+            forward=True,
+        )
+        parts.append(nx.reshape(B, To, -1))
+
+    per_step = torch.cat(parts, dim=-1)  # (B, To, obs_feature_dim)
+    flat_input = per_step.reshape(B, -1)  # (B, To * obs_feature_dim)
+
+    action_mean = mlp(flat_input)  # (B, action_dim)
+    action = _apply_normalizer(
+        action_mean, action_norm["scale"], action_norm["offset"],
+        forward=False,
+    )
+    return action.unsqueeze(1)  # (B, 1, action_dim)
+
+
+def _sim_obs_to_policy_dict(
+    obs_dict: dict[str, torch.Tensor],
+    key_map: dict[str, list[tuple[str, int | None]]],
+) -> dict[str, torch.Tensor]:
+    """Convert sim obs_dict to policy obs_dict using key_map."""
+    policy_dict: dict[str, torch.Tensor] = {}
+    for sim_key, targets in key_map.items():
+        if sim_key not in obs_dict:
+            continue
+        val = obs_dict[sim_key]
+        if len(targets) == 1 and targets[0][1] is None:
+            policy_dict[targets[0][0]] = val
+        else:
+            offset = 0
+            for pkey, dim in targets:
+                if dim is None:
+                    policy_dict[pkey] = val[..., offset:]
+                    break
+                policy_dict[pkey] = val[..., offset:offset + dim]
+                offset += dim
+    return policy_dict
 
 
 # ===================================================================
@@ -857,6 +1068,125 @@ def rollout_episode(
     return False, step, traj
 
 
+def rollout_episode_mlp(
+    mlp: InlineMLP,
+    per_key_norm: dict,
+    action_norm: dict,
+    pcfg: dict,
+    env: gym.Env,
+    rsl_env,
+    term_names: list[str],
+    slices: list[tuple[int, int]],
+    key_map: dict[str, list[tuple[str, int | None]]],
+    obs_keys: list[str],
+    proprio_keys: list[str],
+    asset_keys: list[str],
+    horizon: int,
+    device: torch.device,
+    success_term=None,
+    verbose: bool = False,
+) -> tuple[bool, int, dict[str, Any]]:
+    """Run one episode with MLP policy. Returns ``(success, steps, trajectory_dict)``."""
+    n_obs_steps = pcfg["n_obs_steps"]
+    n_action_steps = pcfg["n_action_steps"]
+    lowdim_keys = pcfg["lowdim_keys"]
+
+    obs_dict_buffer: collections.deque[dict[str, np.ndarray]] = collections.deque(maxlen=n_obs_steps)
+    traj = _trajectory_template()
+
+    obs_raw = rsl_env.get_observations()
+    obs_policy = _get_policy_obs(obs_raw)
+    sim_obs_dict = _extract_obs_dict(obs_policy, term_names, slices)
+    first_obs_flat = _obs_dict_to_vector(sim_obs_dict, obs_keys)
+
+    policy_obs = _sim_obs_to_policy_dict(
+        {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) and v.dim() == 1 else v
+         for k, v in sim_obs_dict.items()},
+        key_map,
+    )
+    policy_obs_np = {k: v.squeeze(0).cpu().numpy() if isinstance(v, torch.Tensor) else v
+                     for k, v in policy_obs.items()}
+
+    for _ in range(n_obs_steps):
+        obs_dict_buffer.append({k: v.copy() for k, v in policy_obs_np.items()})
+    _append_obs(traj, sim_obs_dict, first_obs_flat, proprio_keys, asset_keys)
+
+    if verbose:
+        print(f"  [DEBUG] MLP policy keys: {lowdim_keys}")
+        for k, v in policy_obs_np.items():
+            print(f"  [DEBUG]   {k}: shape={v.shape}, range=[{v.min():.4f}, {v.max():.4f}]")
+
+    step = 0
+    while step < horizon:
+        obs_seq = {
+            k: torch.from_numpy(np.stack([buf[k] for buf in obs_dict_buffer], axis=0)).unsqueeze(0).to(device)
+            for k in lowdim_keys
+        }
+        actions = predict_action_mlp(mlp, per_key_norm, action_norm, pcfg, obs_seq, device)
+        actions_np = actions.squeeze(0).cpu().numpy()
+
+        if verbose and step == 0:
+            print(f"  [DEBUG] First MLP action: {actions_np[0]}")
+
+        for a_idx in range(min(n_action_steps, horizon - step)):
+            action = torch.from_numpy(actions_np[a_idx]).unsqueeze(0).to(device)
+            obs_raw, rew, dones, extras = rsl_env.step(action)
+
+            obs_policy_raw = _get_policy_obs(obs_raw)
+            sim_obs_dict = _extract_obs_dict(obs_policy_raw, term_names, slices)
+            obs_flat = _obs_dict_to_vector(sim_obs_dict, obs_keys)
+
+            policy_obs = _sim_obs_to_policy_dict(
+                {k: v.unsqueeze(0) if isinstance(v, torch.Tensor) and v.dim() == 1 else v
+                 for k, v in sim_obs_dict.items()},
+                key_map,
+            )
+            policy_obs_np = {k: v.squeeze(0).cpu().numpy() if isinstance(v, torch.Tensor) else v
+                             for k, v in policy_obs.items()}
+            obs_dict_buffer.append(policy_obs_np)
+            step += 1
+
+            traj["actions"].append(action.detach().cpu())
+            traj["rewards"].append(rew[:1].detach().cpu().view(1, 1))
+            time_outs = extras.get("time_outs", torch.zeros_like(dones))
+            traj["terminated"].append(
+                (dones[:1] & ~time_outs[:1]).float().detach().cpu().view(1, 1),
+            )
+            traj["truncated"].append(
+                time_outs[:1].float().detach().cpu().view(1, 1),
+            )
+            _append_obs(traj, sim_obs_dict, obs_flat, proprio_keys, asset_keys)
+
+            is_success = False
+            if success_term is not None:
+                try:
+                    success_val = success_term.func(
+                        env.unwrapped, **success_term.params,
+                    )
+                    is_success = bool(success_val[0])
+                except Exception:
+                    pass
+            else:
+                is_success = _check_success_from_reward_manager(env, verbose=(verbose and step % 20 == 0))
+
+            if is_success:
+                return True, step, traj
+
+            if bool(dones[0].item()):
+                is_timeout = bool(time_outs[0].item())
+                is_terminated = bool((dones[0] & ~time_outs[0]).item())
+                if verbose:
+                    print(f"  [DEBUG] Episode ended at step {step}: "
+                          f"timeout={is_timeout}, terminated(abnormal)={is_terminated}")
+                    _check_success_from_reward_manager(env, verbose=True)
+                return False, step, traj
+
+    if verbose:
+        print(f"  [DEBUG] Episode ended at horizon ({horizon} steps)")
+        _check_success_from_reward_manager(env, verbose=True)
+    return False, step, traj
+
+
 # ===================================================================
 # Checkpoint discovery
 # ===================================================================
@@ -871,6 +1201,28 @@ def discover_checkpoints(path: str) -> list[Path]:
             raise FileNotFoundError(f"No .ckpt or .pt files found in {p}")
         return ckpts
     raise FileNotFoundError(f"Checkpoint path does not exist: {p}")
+
+
+class _FrameRecorder(gym.Wrapper):
+    """Captures ``render()`` output after every step for video export."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        self.frames: list[np.ndarray] = []
+
+    def step(self, action):
+        result = self.env.step(action)
+        frame = self.env.render()
+        if frame is not None:
+            self.frames.append(frame)
+        return result
+
+    def save_video(self, path, fps: int = 30):
+        if not self.frames:
+            return
+        import imageio
+        imageio.mimwrite(str(path), self.frames, fps=fps)
+        self.frames.clear()
 
 
 # ===================================================================
@@ -890,9 +1242,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg) -> None:
     if success_term is not None:
         env_cfg.terminations.success = None
 
-    gym_env = gym.make(args_cli.task, cfg=env_cfg, render_mode=None)
+    render_mode = "rgb_array" if args_cli.video else None
+    gym_env = gym.make(args_cli.task, cfg=env_cfg, render_mode=render_mode)
     if isinstance(gym_env.unwrapped, DirectMARLEnv):
         gym_env = multi_agent_to_single_agent(gym_env)
+
+    frame_recorder = None
+    if args_cli.video:
+        frame_recorder = _FrameRecorder(gym_env)
+        gym_env = frame_recorder
+        print("[INFO] Video recording enabled.")
+
     rsl_env = RslRlVecEnvWrapper(gym_env)
 
     device = torch.device(env_cfg.sim.device if env_cfg.sim.device else "cuda:0")
@@ -905,15 +1265,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg) -> None:
     output_root = Path(args_cli.output_dir)
     all_results: dict[str, dict[str, Any]] = {}
 
+    key_map = _parse_key_map(args_cli.sim_to_policy_key_map)
+
     for ckpt_path in ckpt_paths:
         ckpt_name = ckpt_path.stem
         print(f"\n{'='*60}")
         print(f"[INFO] Evaluating: {ckpt_path}")
         print(f"{'='*60}")
 
-        unet, scheduler, norm_params, pcfg = load_checkpoint(
-            str(ckpt_path), device, use_ema=args_cli.use_ema,
-        )
+        policy_type = args_cli.policy_type
+        if policy_type == "auto":
+            policy_type = detect_policy_type(str(ckpt_path))
+        print(f"[INFO] Detected policy type: {policy_type}")
+
+        unet = scheduler = norm_params = None
+        mlp = per_key_norm = action_norm = None
+
+        if policy_type == "mlp":
+            mlp, per_key_norm, action_norm, pcfg = load_mlp_checkpoint(
+                str(ckpt_path), device, use_ema=args_cli.use_ema,
+            )
+        else:
+            unet, scheduler, norm_params, pcfg = load_checkpoint(
+                str(ckpt_path), device, use_ema=args_cli.use_ema,
+            )
 
         if args_cli.n_obs_steps is not None:
             pcfg["n_obs_steps"] = args_cli.n_obs_steps
@@ -939,36 +1314,64 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg) -> None:
             "num_rollouts": args_cli.num_rollouts,
             "horizon": args_cli.horizon,
             "seed": args_cli.seed,
-            "policy_config": pcfg,
+            "policy_config": {k: v for k, v in pcfg.items() if not isinstance(v, (dict, list)) or k in ("lowdim_keys",)},
             "files": [],
         }
 
         results: list[bool] = []
         for trial in range(args_cli.num_rollouts):
             print(f"\n[INFO] Trial {trial + 1}/{args_cli.num_rollouts}")
-            success, steps, traj = rollout_episode(
-                unet=unet,
-                scheduler=scheduler,
-                norm_params=norm_params,
-                pcfg=pcfg,
-                env=gym_env,
-                rsl_env=rsl_env,
-                term_names=term_names,
-                slices=slices,
-                obs_keys=args_cli.obs_keys,
-                proprio_keys=args_cli.proprio_keys,
-                asset_keys=args_cli.asset_keys,
-                horizon=args_cli.horizon,
-                device=device,
-                success_term=success_term,
-                verbose=args_cli.verbose,
-            )
+
+            if policy_type == "mlp":
+                success, steps, traj = rollout_episode_mlp(
+                    mlp=mlp,
+                    per_key_norm=per_key_norm,
+                    action_norm=action_norm,
+                    pcfg=pcfg,
+                    env=gym_env,
+                    rsl_env=rsl_env,
+                    term_names=term_names,
+                    slices=slices,
+                    key_map=key_map,
+                    obs_keys=args_cli.obs_keys,
+                    proprio_keys=args_cli.proprio_keys,
+                    asset_keys=args_cli.asset_keys,
+                    horizon=args_cli.horizon,
+                    device=device,
+                    success_term=success_term,
+                    verbose=args_cli.verbose,
+                )
+            else:
+                success, steps, traj = rollout_episode(
+                    unet=unet,
+                    scheduler=scheduler,
+                    norm_params=norm_params,
+                    pcfg=pcfg,
+                    env=gym_env,
+                    rsl_env=rsl_env,
+                    term_names=term_names,
+                    slices=slices,
+                    obs_keys=args_cli.obs_keys,
+                    proprio_keys=args_cli.proprio_keys,
+                    asset_keys=args_cli.asset_keys,
+                    horizon=args_cli.horizon,
+                    device=device,
+                    success_term=success_term,
+                    verbose=args_cli.verbose,
+                )
             results.append(success)
             print(f"[INFO]   -> {'SUCCESS' if success else 'FAILURE'} in {steps} steps")
 
             _save_trajectory(
                 traj, success, trial, traj_dir, ckpt_output, manifest,
             )
+
+            if frame_recorder is not None and frame_recorder.frames:
+                vid_dir = ckpt_output / "videos"
+                vid_dir.mkdir(parents=True, exist_ok=True)
+                vid_path = vid_dir / f"rollout_{trial:03d}.mp4"
+                frame_recorder.save_video(vid_path)
+                print(f"[INFO]   Video saved to {vid_path}")
 
         n_success = sum(results)
         rate = 100.0 * n_success / args_cli.num_rollouts
