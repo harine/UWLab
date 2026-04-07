@@ -7,7 +7,7 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from uwlab_assets import UWLAB_CLOUD_ASSETS_DIR
-from .rl_state_cfg import FinetuneEvalEventCfg, RlStateSceneCfg
+from .rl_state_cfg import BaseEventCfg, FinetuneEvalEventCfg, RlStateSceneCfg
 from isaaclab.sensors import TiledCameraCfg
 import isaaclab.sim as sim_utils
 from ... import mdp as task_mdp
@@ -247,11 +247,154 @@ class StateCommandsCfg:
     )
 
 @configclass
-class DataCollectionStateEventCfg(FinetuneEvalEventCfg):
-    """Data collection events: override reset to sample from all 4 distributions."""
+class BaseNoRandomizationEventCfg:
+    """Same events as ``BaseEventCfg`` with domain randomization collapsed to fixed values."""
 
+    robot_material = EventTerm(
+        func=task_mdp.randomize_rigid_body_material,  # type: ignore
+        mode="startup",
+        params={
+            "static_friction_range": (0.75, 0.75),
+            "dynamic_friction_range": (0.6, 0.6),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 256,
+            "asset_cfg": SceneEntityCfg("robot"),
+            "make_consistent": True,
+        },
+    )
+
+    insertive_object_material = EventTerm(
+        func=task_mdp.randomize_rigid_body_material,  # type: ignore
+        mode="startup",
+        params={
+            "static_friction_range": (1.5, 1.5),
+            "dynamic_friction_range": (1.4, 1.4),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 256,
+            "asset_cfg": SceneEntityCfg("insertive_object"),
+            "make_consistent": True,
+        },
+    )
+
+    receptive_object_material = EventTerm(
+        func=task_mdp.randomize_rigid_body_material,  # type: ignore
+        mode="startup",
+        params={
+            "static_friction_range": (0.4, 0.4),
+            "dynamic_friction_range": (0.325, 0.325),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 256,
+            "asset_cfg": SceneEntityCfg("receptive_object"),
+            "make_consistent": True,
+        },
+    )
+
+    table_material = EventTerm(
+        func=task_mdp.randomize_rigid_body_material,  # type: ignore
+        mode="startup",
+        params={
+            "static_friction_range": (0.45, 0.45),
+            "dynamic_friction_range": (0.35, 0.35),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 256,
+            "asset_cfg": SceneEntityCfg("table"),
+            "make_consistent": True,
+        },
+    )
+
+    randomize_robot_mass = EventTerm(
+        func=task_mdp.randomize_rigid_body_mass,  # type: ignore
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "mass_distribution_params": (1.0, 1.0),
+            "operation": "scale",
+            "distribution": "uniform",
+            "recompute_inertia": True,
+        },
+    )
+
+    randomize_insertive_object_mass = EventTerm(
+        func=task_mdp.randomize_rigid_body_mass,  # type: ignore
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("insertive_object"),
+            "mass_distribution_params": (0.02, 0.02),
+            "operation": "abs",
+            "distribution": "uniform",
+            "recompute_inertia": True,
+        },
+    )
+
+    randomize_receptive_object_mass = EventTerm(
+        func=task_mdp.randomize_rigid_body_mass,  # type: ignore
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("receptive_object"),
+            "mass_distribution_params": (1.0, 1.0),
+            "operation": "scale",
+            "distribution": "uniform",
+            "recompute_inertia": True,
+        },
+    )
+
+    randomize_table_mass = EventTerm(
+        func=task_mdp.randomize_rigid_body_mass,  # type: ignore
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("table"),
+            "mass_distribution_params": (1.0, 1.0),
+            "operation": "scale",
+            "distribution": "uniform",
+            "recompute_inertia": True,
+        },
+    )
+
+    randomize_gripper_actuator_parameters = EventTerm(
+        func=task_mdp.randomize_actuator_gains,  # type: ignore
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["finger_joint"]),
+            "stiffness_distribution_params": (1.0, 1.0),
+            "damping_distribution_params": (1.0, 1.0),
+            "operation": "scale",
+            "distribution": "log_uniform",
+        },
+    )
+    randomize_osc_gains = EventTerm(
+        func=task_mdp.randomize_rel_cartesian_osc_gains_fixed,
+        mode="reset",
+        params={
+            "action_name": "arm",
+            "scale_range": (1.0, 1.0),
+        },
+    )
+
+    randomize_arm_sysid = EventTerm(
+        func=task_mdp.randomize_arm_from_sysid_fixed,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "joint_names": [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ],
+            "actuator_name": "arm",
+            "scale_range": (1.0, 1.0),
+            "delay_range": (0, 0),
+        },
+    )
+
+
+@configclass
+class DataCollectionStateEventCfg(BaseNoRandomizationEventCfg):
+    """Data collection events: override reset to sample from all 4 distributions."""    
     reset_from_reset_states = EventTerm(
-        func=task_mdp.MultiResetManager,
+        func=task_mdp.MultiResetManager,  # type: ignore
         mode="reset",
         params={
             "dataset_dir": f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/OmniReset",
@@ -267,10 +410,11 @@ class DataCollectionStateEventCfg(FinetuneEvalEventCfg):
     )
 
 @configclass
-class StateEvalEventCfg(FinetuneEvalEventCfg):
+class StateEvalEventCfg(BaseNoRandomizationEventCfg):
     """State evaluation events: override reset to sample from all 4 distributions."""
+
     reset_from_reset_states = EventTerm(
-        func=task_mdp.MultiResetManager,
+        func=task_mdp.MultiResetManager,  # type: ignore
         mode="reset",
         params={
             "dataset_dir": f"{UWLAB_CLOUD_ASSETS_DIR}/Datasets/OmniReset",
