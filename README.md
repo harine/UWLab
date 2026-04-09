@@ -84,3 +84,13 @@ env.scene.insertive_object=peg \
 env.scene.receptive_object=peghole 
 ```
 add `--save_video` and `--enable_cameras` if you would like to record video
+
+### Generate Q Function Videos
+```
+python scripts_v2/evals/eval_q_offline.py   --q_checkpoint <checkpoint> --dataset datasets/peg/q_eval/state0.zarr   --output_dir outputs/q_evals/   --fps 10
+```
+
+### Generate Q Function Distribution
+```
+python scripts_v2/evals/eval_q_distribution.py   --q_checkpoint <checkpoint>   --dataset datasets/peg/privlidged/state2.zarr   --output_dir outputs/q_noise_sweep   --device cuda:0 --max_episodes=50
+```

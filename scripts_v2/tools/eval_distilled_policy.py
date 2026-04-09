@@ -191,6 +191,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
     env_cfg.sim.use_fabric = not args_cli.disable_fabric
     env_cfg.seed = args_cli.seed
     env_cfg.observations.policy.concatenate_terms = False
+
+    del env_cfg.observations.data_collection
+
     if not args_cli.save_video:
         del env_cfg.scene.front_camera
         del env_cfg.scene.side_camera

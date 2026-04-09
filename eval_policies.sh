@@ -19,7 +19,7 @@ for H in "${HORIZONS[@]}"; do
 
     python scripts_v2/tools/eval_distilled_policy.py \
         --task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0 \
-        --checkpoint diffusion_policy/data/outputs/2026.04.07/01.09.04_train_diffusion_unet_image_aux_sim2real_state_privledged/checkpoints/latest.ckpt \
+        --checkpoint checkpoints/step_0030000.ckpt \
         --num_envs 32 \
         --num_trajectories 100 \
         --headless \

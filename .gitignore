@@ -76,3 +76,4 @@ tests/
 .cursor/
 data/
 .vscode
+remote_checkpoints/

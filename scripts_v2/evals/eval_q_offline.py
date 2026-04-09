@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Offline Q evaluation: dataset trajectories, expert action chunks, RGB videos with Q overlay."""
+"""Offline Q evaluation: dataset trajectories, expert action chunks, RGB videos with Q (and optional V) overlay."""
 
 from __future__ import annotations
 
@@ -50,8 +50,8 @@ def _open_zarr_root(dataset_path: str) -> Any:
     raise ValueError(f"Expected a .zarr directory or .zarr.zip file, got: {path}")
 
 
-def _load_q_model(
-    ckpt_path: str, device: torch.device
+def _load_q_image_policy(
+    ckpt_path: str, device: torch.device, label: str = "checkpoint"
 ) -> tuple[QImagePolicy, dict[str, Any]]:
     path = Path(ckpt_path).expanduser()
     with path.open("rb") as f:
@@ -62,12 +62,18 @@ def _load_q_model(
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
     model = cast(Any, workspace).model
     if not isinstance(model, QImagePolicy):
-        raise TypeError(f"Expected QImagePolicy checkpoint, got {type(model)}")
+        raise TypeError(f"Expected QImagePolicy in {label}, got {type(model)}")
     shape_meta = OmegaConf.to_container(cfg.policy.shape_meta, resolve=True)
     shape_meta = cast(dict[str, Any], shape_meta)
     model.eval()
     model.to(device)
     return model, shape_meta
+
+
+def _load_q_model(
+    ckpt_path: str, device: torch.device
+) -> tuple[QImagePolicy, dict[str, Any]]:
+    return _load_q_image_policy(ckpt_path, device, label="Q checkpoint")
 
 
 def _convert_actions_abs_like_dataset(
@@ -208,14 +214,20 @@ def _concat_video_frame(
     return np.concatenate(resized, axis=1)
 
 
-def _overlay_q(frame: np.ndarray, q_val: float, t: int, episode: int) -> np.ndarray:
+def _overlay_metrics(
+    frame: np.ndarray,
+    q_val: float,
+    t: int,
+    episode: int,
+    value_val: float | None = None,
+) -> np.ndarray:
     out = frame.copy()
-    bar_h = 40
+    bar_h = 72 if value_val is not None else 40
     cv2.rectangle(out, (0, 0), (out.shape[1], bar_h), (0, 0, 0), -1)
-    text = f"ep {episode}  t {t}  Q = {q_val:.5f}"
+    line1 = f"ep {episode}  t {t}  Q = {q_val:.5f}"
     cv2.putText(
         out,
-        text,
+        line1,
         (8, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
@@ -223,12 +235,70 @@ def _overlay_q(frame: np.ndarray, q_val: float, t: int, episode: int) -> np.ndar
         2,
         cv2.LINE_AA,
     )
+    if value_val is not None:
+        line2 = f"V = {value_val:.5f}"
+        cv2.putText(
+            out,
+            line2,
+            (8, 58),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (200, 255, 200),
+            2,
+            cv2.LINE_AA,
+        )
     return out
+
+
+def _resolve_checkpoint_paths(args: argparse.Namespace) -> tuple[Path, Path | None]:
+    """Return (q_ckpt, value_ckpt_or_none). Requires q_ckpt to exist as a file."""
+    q_default: Path | None = None
+    v_default: Path | None = None
+    if args.checkpoint:
+        d = Path(args.checkpoint).expanduser()
+        if not d.is_dir():
+            raise NotADirectoryError(f"--checkpoint must be a directory: {d}")
+        q_default = d / "q_best.ckpt"
+        v_default = d / "value_best.ckpt"
+        if not q_default.is_file():
+            raise FileNotFoundError(f"Expected Q checkpoint at {q_default}")
+        if not v_default.is_file():
+            raise FileNotFoundError(f"Expected value checkpoint at {v_default}")
+
+    q_path = Path(args.q_checkpoint).expanduser() if args.q_checkpoint else q_default
+    if q_path is None:
+        raise ValueError(
+            "Provide --checkpoint DIR (containing q_best.ckpt and value_best.ckpt) or --q_checkpoint PATH."
+        )
+    if not q_path.is_file():
+        raise FileNotFoundError(f"Q checkpoint not found: {q_path}")
+
+    if args.value_checkpoint:
+        v_path = Path(args.value_checkpoint).expanduser()
+        if not v_path.is_file():
+            raise FileNotFoundError(f"Value checkpoint not found: {v_path}")
+    elif v_default is not None:
+        v_path = v_default
+    else:
+        v_path = None
+
+    return q_path, v_path
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Offline Q eval with RGB videos from zarr.")
-    parser.add_argument("--q_checkpoint", type=str, required=True)
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Directory containing q_best.ckpt and value_best.ckpt (loads both).",
+    )
+    parser.add_argument(
+        "--q_checkpoint",
+        type=str,
+        default=None,
+        help="Q checkpoint path (overrides --checkpoint/q_best.ckpt if both given).",
+    )
     parser.add_argument("--dataset", type=str, required=True, help=".zarr dir or .zarr.zip")
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--device", type=str, default="cuda:0")
@@ -245,7 +315,18 @@ def main() -> None:
         action="store_true",
         help="Convert relative actions to absolute (needs end_effector_pose in obs).",
     )
+    parser.add_argument(
+        "--value_checkpoint",
+        type=str,
+        default=None,
+        help="Value-head checkpoint (overrides --checkpoint/value_best.ckpt). Q-only if omitted without --checkpoint.",
+    )
     args = parser.parse_args()
+
+    try:
+        q_ckpt_path, value_ckpt_path = _resolve_checkpoint_paths(args)
+    except (ValueError, FileNotFoundError, NotADirectoryError) as e:
+        parser.error(str(e))
 
     if str(args.device).startswith("cuda") and not torch.cuda.is_available():
         print("CUDA not available; falling back to CPU.")
@@ -253,10 +334,27 @@ def main() -> None:
     else:
         device = torch.device(args.device)
 
-    q_model, shape_meta = _load_q_model(args.q_checkpoint, device)
+    q_model, shape_meta = _load_q_model(str(q_ckpt_path), device)
     shape_meta_obs = shape_meta["obs"]
     assert isinstance(shape_meta_obs, dict)
     action_dim_expect = int(shape_meta["action"]["shape"][0])
+
+    value_model: QImagePolicy | None = None
+    value_meta_obs: dict[str, Any] | None = None
+    value_n_obs: int | None = None
+    if value_ckpt_path is not None:
+        value_model, value_shape_meta = _load_q_image_policy(
+            str(value_ckpt_path), device, label="value checkpoint"
+        )
+        vo = value_shape_meta["obs"]
+        assert isinstance(vo, dict)
+        value_meta_obs = vo
+        value_n_obs = int(value_model.n_obs_steps)
+        if value_model.action_dim != action_dim_expect:
+            print(
+                f"Warning: value checkpoint action_dim={value_model.action_dim} != Q action_dim={action_dim_expect} "
+                "(value head does not use actions; continuing)."
+            )
 
     n_obs = int(q_model.n_obs_steps)
     n_act = int(q_model.n_action_steps)
@@ -279,6 +377,13 @@ def main() -> None:
             raise KeyError(
                 f"Q obs key '{key}' not found in zarr data/obs. Available: {list(obs_grp.keys())}"
             )
+
+    if value_meta_obs is not None:
+        for key in value_meta_obs:
+            if key not in obs_grp:
+                raise KeyError(
+                    f"Value obs key '{key}' not found in zarr data/obs. Available: {list(obs_grp.keys())}"
+                )
 
     actions = np.asarray(actions_z[:])
     if actions.ndim != 2:
@@ -304,10 +409,13 @@ def main() -> None:
     n_eps = len(episode_ends)
     cap = args.max_episodes if args.max_episodes is not None else n_eps
 
-    print(
+    msg = (
         f"Q model: n_obs_steps={n_obs}, n_action_steps={n_act}, action_dim={action_dim_expect}. "
         f"Episodes: {n_eps}, writing up to {cap}. Output FPS: {out_fps:.3f}"
     )
+    if value_model is not None and value_n_obs is not None:
+        msg += f" | Value model: n_obs_steps={value_n_obs}"
+    print(msg)
 
     for ep_idx in range(min(cap, n_eps)):
         ep_start = int(ep_starts[ep_idx])
@@ -321,11 +429,26 @@ def main() -> None:
             act_t = torch.from_numpy(np.expand_dims(a_chunk, 0)).to(
                 device, dtype=torch.float32, non_blocking=True
             )
+            v_val: float | None = None
             with torch.inference_mode():
                 q_t = q_model.predict_q(obs_dict, act_t).squeeze()
+                if value_model is not None and value_meta_obs is not None and value_n_obs is not None:
+                    if value_n_obs == n_obs and value_meta_obs.keys() == shape_meta_obs.keys():
+                        obs_for_value = obs_dict
+                    else:
+                        obs_for_value = _build_obs_dict(
+                            obs_grp,
+                            value_meta_obs,
+                            ep_start,
+                            ep_end,
+                            t,
+                            value_n_obs,
+                            device,
+                        )
+                    v_val = float(value_model.predict_value(obs_for_value).squeeze().item())
             q_val = float(q_t.item())
             vid = _concat_video_frame(obs_grp, t)
-            frames.append(_overlay_q(vid, q_val, t, ep_idx))
+            frames.append(_overlay_metrics(vid, q_val, t, ep_idx, v_val))
 
         out_path = out_dir / f"ep_{ep_idx:04d}.mp4"
         imageio.mimsave(str(out_path), frames, fps=out_fps, codec="libx264")  # type: ignore[arg-type]
