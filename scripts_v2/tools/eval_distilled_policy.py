@@ -13,6 +13,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+from typing import Any
 
 from isaaclab.app import AppLauncher
 
@@ -23,6 +24,13 @@ parser.add_argument(
 )
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to diffusion policy checkpoint.")
+parser.add_argument("--q_checkpoint", type=str, default=None, help="Path to Q-function checkpoint for best-of-k.")
+parser.add_argument(
+    "--k",
+    type=int,
+    default=1,
+    help="Number of candidate action chunks to sample per replanning step when using --q_checkpoint.",
+)
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to run in parallel.")
 parser.add_argument(
     "--num_trajectories",
@@ -74,6 +82,7 @@ from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from isaaclab.envs import DirectRLEnvCfg, ManagerBasedRLEnvCfg
 
 # Import the Diffusion policy wrapper
+from uwlab_rl.wrappers.best_of_k import BestOfKWrapper
 from uwlab_rl.wrappers.diffusion import DiffusionPolicyWrapper
 
 import uwlab_tasks  # noqa: F401
@@ -91,20 +100,39 @@ def _set_seeds(seed: int):
 
 def _load_policy(ckpt_path: str, device: torch.device, use_ema: bool = False) -> BaseImagePolicy:
     with open(ckpt_path, "rb") as f:
-        payload = torch.load(f, pickle_module=dill)
+        payload = torch.load(f, pickle_module=dill, map_location="cpu")
     cfg = payload["cfg"]
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg)
     workspace: BaseWorkspace
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
-    policy = workspace.ema_model if cfg.training.use_ema else workspace.model
+    workspace_any: Any = workspace
+    policy = workspace_any.ema_model if cfg.training.use_ema else workspace_any.model
     policy.abs_action = bool(getattr(getattr(cfg.task, "dataset", {}), "abs_action", False))
     return policy.eval().to(device)
 
 
-def _get_policy_chunk_info(policy: BaseImagePolicy) -> tuple[int, int]:
-    n_obs_steps = int(getattr(policy, "n_obs_steps", 1))
-    n_action_steps = int(getattr(policy, "n_action_steps", 1))
+def _load_q_function(ckpt_path: str, device: torch.device):
+    with open(ckpt_path, "rb") as f:
+        payload = torch.load(f, pickle_module=dill, map_location="cpu")
+    cfg = payload["cfg"]
+    cls = hydra.utils.get_class(cfg._target_)
+    workspace = cls(cfg)
+    workspace: BaseWorkspace
+    workspace.load_payload(payload, exclude_keys=None, include_keys=None)
+    workspace_any: Any = workspace
+    q_function = workspace_any.model
+    if not hasattr(q_function, "predict_q"):
+        raise TypeError(f"Expected Q-function checkpoint with predict_q(), got {type(q_function)}")
+    return q_function.eval().to(device)
+
+
+def _get_policy_chunk_info(policy: Any) -> tuple[int, int]:
+    inner_policy: Any = policy
+    while hasattr(inner_policy, "policy"):
+        inner_policy = inner_policy.policy
+    n_obs_steps = int(getattr(inner_policy, "n_obs_steps", 1))
+    n_action_steps = int(getattr(inner_policy, "n_action_steps", 1))
     return n_obs_steps, n_action_steps
 
 
@@ -203,6 +231,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
 
     policy = _load_policy(args_cli.checkpoint, device)
+    if args_cli.k < 1:
+        raise ValueError("--k must be at least 1.")
+    if args_cli.q_checkpoint is None and args_cli.k != 1:
+        raise ValueError("--k can only be set above 1 when --q_checkpoint is provided.")
+    if args_cli.q_checkpoint is not None and args_cli.k <= 1:
+        raise ValueError("--q_checkpoint requires --k to be greater than 1.")
+    use_best_of_k = args_cli.q_checkpoint is not None
+    if use_best_of_k:
+        if not hasattr(policy, "predict_k_actions"):
+            raise AttributeError(
+                f"{policy.__class__.__name__} must implement predict_k_actions(obs_dict, k) for best-of-k evaluation."
+            )
+        q_function = _load_q_function(args_cli.q_checkpoint, device)
+        policy = BestOfKWrapper(policy, q_function, args_cli.k)
+        setattr(policy, "abs_action", getattr(policy.policy, "abs_action", False))
+
     n_obs_steps, n_action_steps = _get_policy_chunk_info(policy)
     if args_cli.execute_horizon is not None and args_cli.execute_horizon < 1:
         raise ValueError("--execute_horizon must be at least 1 when provided.")
@@ -211,6 +255,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
         f"Loaded policy `{policy.__class__.__name__}` "
         f"with n_obs_steps={n_obs_steps}, n_action_steps={n_action_steps}."
     )
+    if use_best_of_k:
+        print(
+            f"Best-of-k enabled with `{q_function.__class__.__name__}`: "
+            f"sampling {args_cli.k} action chunks and selecting the highest-Q chunk."
+        )
     if n_action_steps > 1:
         if execute_horizon is None:
             print("Action chunking enabled: full predicted chunks will be executed before replanning.")

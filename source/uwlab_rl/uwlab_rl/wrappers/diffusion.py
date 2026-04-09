@@ -170,7 +170,7 @@ class DiffusionPolicyWrapper:
         self.num_envs = num_envs
         self.execute_horizon = execute_horizon
         self.use_absolute_actions = use_absolute_actions
-        self.absolute_actions = bool(getattr(policy, "abs_action", False))
+        self.absolute_actions = bool(getattr(self._unwrap_policy(policy), "abs_action", False))
 
         # Initialize observation history manager based on policy type
         self.is_image_policy = self._is_image_policy()
@@ -185,11 +185,14 @@ class DiffusionPolicyWrapper:
         # Reset the policy to initialize its internal queues
         self.policy.reset()
 
+    def _unwrap_policy(self, policy):
+        while hasattr(policy, "policy"):
+            policy = policy.policy
+        return policy
+
     def _is_image_policy(self) -> bool:
         """Detect if this is an image policy based on class name."""
-        policy_class_name = self.policy.__class__.__name__.lower()
-        if policy_class_name == "bestkwrapper":
-            policy_class_name = self.policy.policy.__class__.__name__.lower()
+        policy_class_name = self._unwrap_policy(self.policy).__class__.__name__.lower()
         image_policy_indicators = ["image", "hybrid", "video", "actionchunktransformer"]
         return any(indicator in policy_class_name for indicator in image_policy_indicators)
 
