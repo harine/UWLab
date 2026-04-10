@@ -94,3 +94,16 @@ python scripts_v2/evals/eval_q_offline.py   --q_checkpoint <checkpoint> --datase
 ```
 python scripts_v2/evals/eval_q_distribution.py   --q_checkpoint <checkpoint>   --dataset datasets/peg/privlidged/state2.zarr   --output_dir outputs/q_noise_sweep   --device cuda:0 --max_episodes=50
 ```
+### Eval Policy + Q function best of k
+```
+python scripts_v2/tools/eval_distilled_policy.py \
+--task OmniReset-Ur5eRobotiq2f85-RelCartesianOSC-State-Play-v0 \ --checkpoint remote_checkpoints/old/latest.ckpt \
+--num_envs 32 \
+--num_trajectories 100 \
+--headless \
+env.scene.insertive_object=peg \
+env.scene.receptive_object=peghole \
+--k 16 \
+--execute_horizon 1 \
+--q_checkpoint diffusion_policy/data/outputs/2026.04.08/16.54.33_train_bellman_q_image_sim2real_state_privledged/checkpoints/q_best.ckpt
+```

@@ -29,7 +29,20 @@ parser.add_argument(
     "--k",
     type=int,
     default=1,
-    help="Number of candidate action chunks to sample per replanning step when using --q_checkpoint.",
+    help=(
+        "With --q_checkpoint: number of Q-scored candidates per replanning step. "
+        "If --action_noise_std is set, one policy action plus k Gaussian-noisy variants; "
+        "otherwise k independent policy samples (best-of-k)."
+    ),
+)
+parser.add_argument(
+    "--action_noise_std",
+    type=float,
+    default=None,
+    help=(
+        "If set with --q_checkpoint, use one predict_action sample and add N(0, std^2) noise to build "
+        "k candidates, then select by Q. If unset, use best-of-k (requires predict_k_actions)."
+    ),
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to run in parallel.")
 parser.add_argument(
@@ -84,6 +97,7 @@ from isaaclab.envs import DirectRLEnvCfg, ManagerBasedRLEnvCfg
 # Import the Diffusion policy wrapper
 from uwlab_rl.wrappers.best_of_k import BestOfKWrapper
 from uwlab_rl.wrappers.diffusion import DiffusionPolicyWrapper
+from uwlab_rl.wrappers.noise_around_action import NoiseAroundActionWrapper
 
 import uwlab_tasks  # noqa: F401
 from uwlab_tasks.utils.hydra import hydra_task_compose
@@ -233,12 +247,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
     policy = _load_policy(args_cli.checkpoint, device)
     if args_cli.k < 1:
         raise ValueError("--k must be at least 1.")
-    if args_cli.q_checkpoint is None and args_cli.k != 1:
-        raise ValueError("--k can only be set above 1 when --q_checkpoint is provided.")
-    if args_cli.q_checkpoint is not None and args_cli.k <= 1:
-        raise ValueError("--q_checkpoint requires --k to be greater than 1.")
-    use_best_of_k = args_cli.q_checkpoint is not None
-    if use_best_of_k:
+    if args_cli.q_checkpoint is None:
+        if args_cli.k != 1:
+            raise ValueError("--k can only be set above 1 when --q_checkpoint is provided.")
+        if args_cli.action_noise_std is not None:
+            raise ValueError("--action_noise_std requires --q_checkpoint.")
+    else:
+        if args_cli.action_noise_std is not None and args_cli.action_noise_std < 0:
+            raise ValueError("--action_noise_std must be non-negative.")
+
+    use_q_selection = args_cli.q_checkpoint is not None
+    use_noise_around = use_q_selection and args_cli.action_noise_std is not None
+    use_best_of_k = use_q_selection and not use_noise_around
+    q_function = None
+    if use_noise_around:
+        q_function = _load_q_function(args_cli.q_checkpoint, device)
+        policy = NoiseAroundActionWrapper(policy, q_function, args_cli.k, args_cli.action_noise_std)
+        setattr(policy, "abs_action", getattr(policy.policy, "abs_action", False))
+    elif use_best_of_k:
         if not hasattr(policy, "predict_k_actions"):
             raise AttributeError(
                 f"{policy.__class__.__name__} must implement predict_k_actions(obs_dict, k) for best-of-k evaluation."
@@ -255,10 +281,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
         f"Loaded policy `{policy.__class__.__name__}` "
         f"with n_obs_steps={n_obs_steps}, n_action_steps={n_action_steps}."
     )
-    if use_best_of_k:
+    if use_best_of_k and q_function is not None:
         print(
             f"Best-of-k enabled with `{q_function.__class__.__name__}`: "
             f"sampling {args_cli.k} action chunks and selecting the highest-Q chunk."
+        )
+    if use_noise_around and q_function is not None:
+        print(
+            f"Noise-around-action Q selection with `{q_function.__class__.__name__}`: "
+            f"one policy action + {args_cli.k} noisy candidates (std={args_cli.action_noise_std}), "
+            "selecting the highest-Q chunk."
         )
     if n_action_steps > 1:
         if execute_horizon is None:
