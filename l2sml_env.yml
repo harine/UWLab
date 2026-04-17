@@ -1,0 +1,36 @@
+name: l2sml_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - importlib_metadata
+  - pip:
+    # --- Isaac Sim + Isaac Lab ---
+    - isaacsim[all,extscache]==5.1.0
+    - --extra-index-url https://pypi.nvidia.com
+
+    # --- PyTorch (CUDA 12.8) ---
+    - torch==2.7.0
+    - torchvision==0.22.0
+    - torchaudio==2.7.0
+    - --extra-index-url https://download.pytorch.org/whl/cu128
+
+    # --- Diffusion Policy deps ---
+    - diffusers==0.27.2
+    - huggingface-hub==0.25.2
+    - transformers==4.44.2
+    - accelerate==1.13.0
+    - dill==0.4.1
+    - einops==0.8.2
+    - hydra-core==1.3.2
+    - omegaconf==2.3.0
+    - wandb==0.25.1
+    - zarr==2.18.3
+    - filelock==3.13.1
+    - threadpoolctl==3.6.0
+
+    # --- UWLab (editable installs, run ./uwlab.sh -i none after env creation) ---
+    # isaaclab, uwlab, uwlab_tasks, uwlab_assets, uwlab_rl
+    # are installed via: ./uwlab.sh -i none
+    # diffusion_policy is installed via: pip install -e ./diffusion_policy

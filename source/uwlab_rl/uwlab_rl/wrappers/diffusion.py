@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import math
+
 import torch
 from abc import ABC, abstractmethod
 from typing import Any
@@ -149,6 +151,8 @@ class DiffusionPolicyWrapper:
         num_envs: int = 1,
         execute_horizon: int | None = None,
         use_absolute_actions: bool = False,
+        temporal_ensemble: bool = False,
+        temporal_ensemble_decay: float = 0.01,
     ):
         """Initialize the policy wrapper.
 
@@ -159,10 +163,16 @@ class DiffusionPolicyWrapper:
             num_envs: Number of environments to handle.
             execute_horizon: Number of actions to execute from each chunk before
                 replanning. None = execute full chunk (open-loop). 1 = replan
-                every step (receding horizon).
+                every step (receding horizon). Ignored when temporal_ensemble
+                is True.
             use_absolute_actions: Whether to use the latest end-effector pose
                 observation to convert absolute policy actions back into
                 relative environment actions.
+            temporal_ensemble: When True, query the policy every step and
+                compute a weighted average over overlapping action chunk
+                predictions using exponential decay weights.
+            temporal_ensemble_decay: Decay rate for temporal ensemble weights.
+                Weight for position j in a chunk is exp(-decay * j).
         """
         self.policy = policy
         self.device = device
@@ -171,6 +181,10 @@ class DiffusionPolicyWrapper:
         self.execute_horizon = execute_horizon
         self.use_absolute_actions = use_absolute_actions
         self.absolute_actions = bool(getattr(self._unwrap_policy(policy), "abs_action", False))
+        self.temporal_ensemble = temporal_ensemble
+        self.temporal_ensemble_decay = temporal_ensemble_decay
+        self._ensemble_accum = None
+        self._ensemble_weights = None
 
         # Initialize observation history manager based on policy type
         self.is_image_policy = self._is_image_policy()
@@ -202,6 +216,11 @@ class DiffusionPolicyWrapper:
         for i in reset_indices:
             self.action_queue[i].clear()
 
+        if self.temporal_ensemble and self._ensemble_accum is not None:
+            for i in reset_indices:
+                self._ensemble_accum[i] = 0.0
+                self._ensemble_weights[i] = 0.0
+
         # Reset observation history for these environments
         if isinstance(reset_indices, torch.Tensor):
             reset_indices = reset_indices.tolist()
@@ -226,21 +245,24 @@ class DiffusionPolicyWrapper:
         # Update observation history with batched operations
         self.obs_history_manager.update(processed_obs)
 
-        # Find environments that need new action chunks
-        need_new_actions = [i for i in range(self.num_envs) if len(self.action_queue[i]) == 0]
+        if self.temporal_ensemble:
+            actions = self._predict_with_temporal_ensemble()
+        else:
+            # Find environments that need new action chunks
+            need_new_actions = [i for i in range(self.num_envs) if len(self.action_queue[i]) == 0]
 
-        if need_new_actions:
-            # Get new action chunks for environments that need them
-            new_actions = self._get_action_chunks(need_new_actions)
+            if need_new_actions:
+                # Get new action chunks for environments that need them
+                new_actions = self._get_action_chunks(need_new_actions)
 
-            # Distribute action chunks to respective queues
-            for idx, env_idx in enumerate(need_new_actions):
-                self.action_queue[env_idx].extend(new_actions[idx])
+                # Distribute action chunks to respective queues
+                for idx, env_idx in enumerate(need_new_actions):
+                    self.action_queue[env_idx].extend(new_actions[idx])
 
-        # Extract next action for each environment
-        actions = torch.zeros(self.num_envs, self.action_queue[0][0].shape[-1], device=self.device, dtype=torch.float32)
-        for i in range(self.num_envs):
-            actions[i] = self.action_queue[i].pop(0)
+            # Extract next action for each environment
+            actions = torch.zeros(self.num_envs, self.action_queue[0][0].shape[-1], device=self.device, dtype=torch.float32)
+            for i in range(self.num_envs):
+                actions[i] = self.action_queue[i].pop(0)
 
         if latest_ee_pose is not None:
             actions = self._convert_absolute_actions(actions, latest_ee_pose)
@@ -349,6 +371,49 @@ class DiffusionPolicyWrapper:
                 action_chunks.append(action_chunk[i].unsqueeze(0))
 
         return action_chunks
+
+    def _predict_with_temporal_ensemble(self) -> torch.Tensor:
+        all_indices = list(range(self.num_envs))
+        obs_batch = self.obs_history_manager.get_batch(all_indices)
+
+        result = self.policy.predict_action(obs_batch)
+        action_chunk = result["action"] if isinstance(result, dict) else result
+        if action_chunk.ndim == 2:
+            action_chunk = action_chunk.unsqueeze(1)
+
+        chunk_len = action_chunk.shape[1]
+        action_dim = action_chunk.shape[2]
+
+        if self._ensemble_accum is None:
+            self._ensemble_accum = torch.zeros(
+                self.num_envs, chunk_len, action_dim, device=self.device
+            )
+            self._ensemble_weights = torch.zeros(
+                self.num_envs, chunk_len, device=self.device
+            )
+
+        m = self.temporal_ensemble_decay
+        pos_weights = torch.exp(
+            -m * torch.arange(chunk_len, device=self.device, dtype=torch.float32)
+        )
+
+        # Exponentially decay all old contributions before adding the new chunk.
+        # exp(-m) per step means a contribution from k steps ago carries weight
+        # exp(-m*k), so the effective averaging window is ~1/m steps.
+        self._ensemble_accum *= math.exp(-m)
+        self._ensemble_weights *= math.exp(-m)
+
+        self._ensemble_accum += pos_weights[None, :, None] * action_chunk
+        self._ensemble_weights += pos_weights[None, :]
+
+        actions = self._ensemble_accum[:, 0] / self._ensemble_weights[:, 0].clamp(min=1e-8).unsqueeze(-1)
+
+        self._ensemble_accum[:, :-1] = self._ensemble_accum[:, 1:].clone()
+        self._ensemble_accum[:, -1] = 0.0
+        self._ensemble_weights[:, :-1] = self._ensemble_weights[:, 1:].clone()
+        self._ensemble_weights[:, -1] = 0.0
+
+        return actions
 
     def _extract_latest_end_effector_pose(self, obs_dict: dict[str, Any]) -> torch.Tensor:
         """Extract the latest end-effector pose from the current observation."""

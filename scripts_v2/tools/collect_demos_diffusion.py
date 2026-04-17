@@ -57,6 +57,18 @@ parser.add_argument(
     default=None,
     help="Number of actions to execute from each predicted chunk before replanning. Defaults to the full chunk.",
 )
+parser.add_argument(
+    "--temporal_ensemble",
+    action="store_true",
+    default=False,
+    help="Enable temporal ensembling: query the policy every step and average overlapping action chunk predictions.",
+)
+parser.add_argument(
+    "--temporal_ensemble_decay",
+    type=float,
+    default=0.01,
+    help="Exponential decay rate for temporal ensemble weights.",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -194,6 +206,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, _agent_cfg):
         num_envs=num_envs,
         execute_horizon=execute_horizon,
         use_absolute_actions=args_cli.use_absolute,
+        temporal_ensemble=args_cli.temporal_ensemble,
+        temporal_ensemble_decay=args_cli.temporal_ensemble_decay,
     )
 
     obs_dict, _ = env.reset()

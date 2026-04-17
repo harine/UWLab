@@ -1,3 +1,2 @@
 [submodule "diffusion_policy"]
-	path = diffusion_policy
-	url = git@github.com:titanium-47/diffusion_policy.git
+	url = git@github.com:harine/diffusion_policy.git

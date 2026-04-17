@@ -66,6 +66,24 @@ parser.add_argument(
     default=None,
     help="Number of actions to execute from each predicted chunk before replanning. Defaults to the full chunk.",
 )
+parser.add_argument(
+    "--temporal_ensemble",
+    action="store_true",
+    default=False,
+    help="Enable temporal ensembling: query the policy every step and average overlapping action chunk predictions.",
+)
+parser.add_argument(
+    "--temporal_ensemble_decay",
+    type=float,
+    default=0.5,
+    help="Exponential decay rate for temporal ensemble weights (higher = less smoothing).",
+)
+parser.add_argument(
+    "--output_dir",
+    type=str,
+    default=None,
+    help="Directory to save videos and stats JSON. Defaults to outputs/eval/<run_name>.",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -77,6 +95,8 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import json
+import os
 import gymnasium as gym
 import numpy as np
 import random
@@ -112,10 +132,56 @@ def _set_seeds(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
+def _reconcile_mlp_cfg(cfg, state_dict: dict):
+    """Detect MLP-policy `autoregressive` flag from saved weights when cfg doesn't specify it.
+
+    Training scripts for `MLPImagePolicy` sometimes omit `autoregressive`, so cfg falls back
+    to the code default at eval time. If that default has changed since training, the
+    re-instantiated model shape won't match the checkpoint. We recover by inspecting
+    `mean_head.weight` and `trunk.0.weight`.
+    """
+    if "mean_head.weight" not in state_dict or "trunk.0.weight" not in state_dict:
+        return
+    policy_cfg = cfg.policy
+    target = str(getattr(policy_cfg, "_target_", ""))
+    if "MLPImagePolicy" not in target:
+        return
+    try:
+        from omegaconf import open_dict
+        from diffusion_policy.policy.mlp_image_policy import MLPImagePolicy  # noqa
+    except Exception:
+        open_dict = None  # type: ignore
+
+    shape_meta = cfg.shape_meta
+    action_dim = int(shape_meta.action.shape[0])
+    n_action_steps = int(policy_cfg.n_action_steps)
+    out_dim = state_dict["mean_head.weight"].shape[0]
+
+    if out_dim == action_dim:
+        desired = True
+    elif out_dim == n_action_steps * action_dim:
+        desired = False
+    else:
+        return
+
+    current = bool(getattr(policy_cfg, "autoregressive", True))
+    if current != desired:
+        print(
+            f"Reconciling MLP cfg: autoregressive {current} -> {desired} "
+            f"(mean_head out={out_dim}, action_dim={action_dim}, n_action_steps={n_action_steps})"
+        )
+        if open_dict is not None:
+            with open_dict(policy_cfg):
+                policy_cfg.autoregressive = desired
+        else:
+            policy_cfg.autoregressive = desired
+
+
 def _load_policy(ckpt_path: str, device: torch.device, use_ema: bool = False) -> BaseImagePolicy:
     with open(ckpt_path, "rb") as f:
         payload = torch.load(f, pickle_module=dill, map_location="cpu")
     cfg = payload["cfg"]
+    _reconcile_mlp_cfg(cfg, payload["state_dicts"].get("model", {}))
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg)
     workspace: BaseWorkspace
@@ -148,6 +214,36 @@ def _get_policy_chunk_info(policy: Any) -> tuple[int, int]:
     n_obs_steps = int(getattr(inner_policy, "n_obs_steps", 1))
     n_action_steps = int(getattr(inner_policy, "n_action_steps", 1))
     return n_obs_steps, n_action_steps
+
+
+def _get_policy_obs_keys(policy: Any) -> set[str] | None:
+    """Return the set of observation keys the policy's normalizer was trained with."""
+    inner = policy
+    while hasattr(inner, "policy"):
+        inner = inner.policy
+    normalizer = getattr(inner, "normalizer", None)
+    if normalizer is None:
+        return None
+    params = getattr(normalizer, "params_dict", None)
+    if params is None:
+        return None
+    keys = {k for k in params.keys() if k not in ("_default", "action")}
+    return keys if keys else None
+
+
+def _prune_env_obs(env_cfg, policy_obs_keys: set[str]):
+    """Remove observation terms from env_cfg.observations.policy that the policy doesn't expect."""
+    policy_group = env_cfg.observations.policy
+    group_meta = {"concatenate_terms", "concatenate_dim", "enable_corruption", "history_length", "flatten_history_dim"}
+    env_terms = {
+        name for name in vars(policy_group).keys()
+        if not name.startswith("_") and name not in group_meta
+    }
+    extra = env_terms - policy_obs_keys
+    if extra:
+        print(f"Pruning env obs terms not in policy normalizer: {sorted(extra)}")
+        for name in extra:
+            delattr(policy_group, name)
 
 
 def _discover_cameras(obs_dict, env):
@@ -185,14 +281,18 @@ def _capture_frame(obs_dict, env, env_idx: int, cam_keys: list, scene_cam_names:
     return np.concatenate(imgs, axis=1) if imgs else None
 
 
-def _count_successes(env, reset_ids: torch.Tensor, term_names: list[str]) -> int:
+def _count_successes(env, reset_ids: torch.Tensor, term_names: list[str]) -> tuple[int, list[bool]]:
+    """Return (success_count, per_env_success_flags) for the given reset_ids."""
     count = 0
+    flags: list[bool] = []
     term_dones = env.unwrapped.termination_manager._term_dones[reset_ids]
     for term_row in term_dones:
         active = term_row.nonzero(as_tuple=False).flatten().cpu().tolist()
-        if any(term_names[idx] == "success" for idx in active):
+        is_success = any(term_names[idx] == "success" for idx in active)
+        flags.append(is_success)
+        if is_success:
             count += 1
-    return count
+    return count, flags
 
 
 def _collect_metrics(infos: dict, episode_metrics: dict):
@@ -203,20 +303,26 @@ def _collect_metrics(infos: dict, episode_metrics: dict):
             episode_metrics.setdefault(key, []).append(value)
 
 
-def _print_results(episodes: int, successful_episodes: int, episode_metrics: dict):
+def _print_results(episodes: int, successful_episodes: int, episode_metrics: dict) -> dict:
+    stats: dict = {"total_trajectories": episodes, "successful_trajectories": successful_episodes}
     print("\nFinal Statistics:")
     print(f"Total trajectories evaluated: {episodes}")
     if successful_episodes > 0 or "Episode_Termination/success" in episode_metrics:
+        stats["success_rate"] = successful_episodes / episodes * 100 if episodes > 0 else 0.0
         print(f"Successful trajectories: {successful_episodes}")
-        print(f"Success rate: {successful_episodes / episodes * 100:.2f}%")
+        print(f"Success rate: {stats['success_rate']:.2f}%")
     else:
         print("Success rate: Not calculable (success metric not found in environment)")
     if episode_metrics:
         print("\nAverage Metrics:")
+        avg_metrics: dict = {}
         for metric_name, values in sorted(episode_metrics.items()):
             if values:
                 floats = [float(v) if isinstance(v, torch.Tensor) else v for v in values]
-                print(f"{metric_name}: {sum(floats) / len(floats):.4f}")
+                avg_metrics[metric_name] = sum(floats) / len(floats)
+                print(f"{metric_name}: {avg_metrics[metric_name]:.4f}")
+        stats["metrics"] = avg_metrics
+    return stats
 
 
 @hydra_task_compose(args_cli.task, "env_cfg_entry_point", hydra_args=remaining_args)
@@ -233,6 +339,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
     env_cfg.sim.use_fabric = not args_cli.disable_fabric
     env_cfg.seed = args_cli.seed
     env_cfg.observations.policy.concatenate_terms = False
+    if not hasattr(env_cfg.observations.policy, "concatenate_dim"):
+        env_cfg.observations.policy.concatenate_dim = -1
 
     del env_cfg.observations.data_collection
 
@@ -242,9 +350,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
         del env_cfg.scene.wrist_camera
         del env_cfg.observations.camera
 
-    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
-
     policy = _load_policy(args_cli.checkpoint, device)
+    policy_obs_keys = _get_policy_obs_keys(policy)
+    if policy_obs_keys is not None:
+        _prune_env_obs(env_cfg, policy_obs_keys)
+
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
     if args_cli.k < 1:
         raise ValueError("--k must be at least 1.")
     if args_cli.q_checkpoint is None:
@@ -307,7 +418,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
         num_envs=args_cli.num_envs,
         execute_horizon=execute_horizon,
         use_absolute_actions=args_cli.use_absolute,
+        temporal_ensemble=args_cli.temporal_ensemble,
+        temporal_ensemble_decay=args_cli.temporal_ensemble_decay,
     )
+
+    if args_cli.output_dir is not None:
+        output_dir = args_cli.output_dir
+    else:
+        te_tag = "te" if args_cli.temporal_ensemble else "no_te"
+        eh_tag = f"eh{execute_horizon}" if execute_horizon is not None else "eh_full"
+        ckpt_name = os.path.splitext(os.path.basename(args_cli.checkpoint))[0]
+        output_dir = os.path.join("outputs", "eval", f"{ckpt_name}_{te_tag}_{eh_tag}")
+    os.makedirs(output_dir, exist_ok=True)
 
     obs_dict, _ = env.reset()
     dones = torch.ones(args_cli.num_envs, dtype=torch.bool, device=device)
@@ -323,8 +445,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
     if args_cli.num_trajectories is not None:
         pbar = tqdm(total=args_cli.num_trajectories, desc="Evaluating trajectories (Success: 0.00%)")
 
-    # Video recording state
-    cam_keys, scene_cam_names, env_frames, frames_to_save = [], [], [], []
+    # Video recording state -- save one successful and one unsuccessful rollout
+    cam_keys, scene_cam_names = [], []
+    env_frames: list[list] = []
+    saved_success_video = False
+    saved_failure_video = False
     if args_cli.save_video:
         cam_keys, scene_cam_names = _discover_cameras(obs_dict, env)
         env_frames = [[] for _ in range(args_cli.num_envs)]
@@ -337,7 +462,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
         with torch.inference_mode(), torch.autocast(device_type=device.type) if args_cli.use_amp else nullcontext():
             actions = wrapped_policy.predict_action(obs_dict)
 
-            if args_cli.save_video:
+            if args_cli.save_video and not (saved_success_video and saved_failure_video):
                 for i in range(args_cli.num_envs):
                     frame = _capture_frame(obs_dict, env, i, cam_keys, scene_cam_names)
                     if frame is not None:
@@ -366,24 +491,48 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg, agent_cfg):
 
             if isinstance(dones, torch.Tensor) and dones.any():
                 reset_ids = (dones > 0).nonzero(as_tuple=False).reshape(-1)
-                successful_episodes += _count_successes(env, reset_ids, term_names)
+                succ_count, succ_flags = _count_successes(env, reset_ids, term_names)
+                successful_episodes += succ_count
                 wrapped_policy.reset(reset_ids)
                 _collect_metrics(infos, episode_metrics)
                 steps = 0
 
                 if args_cli.save_video:
-                    for i in reset_ids:
-                        frames_to_save.extend(env_frames[i])
-                        env_frames[i] = []
-                    imageio.mimsave("outputs/videos/policy_cameras.mp4", frames_to_save, fps=10, codec="libx264")
+                    for idx, env_id in enumerate(reset_ids.tolist()):
+                        frames = env_frames[env_id]
+                        env_frames[env_id] = []
+                        if not frames:
+                            continue
+                        if succ_flags[idx] and not saved_success_video:
+                            path = os.path.join(output_dir, "success.mp4")
+                            imageio.mimsave(path, frames, fps=10, codec="libx264")
+                            saved_success_video = True
+                        elif not succ_flags[idx] and not saved_failure_video:
+                            path = os.path.join(output_dir, "failure.mp4")
+                            imageio.mimsave(path, frames, fps=10, codec="libx264")
+                            saved_failure_video = True
+                    if saved_success_video and saved_failure_video:
+                        cam_keys, scene_cam_names = [], []
 
                 if pbar is not None:
                     pbar.update(len(new_ids))
                     rate = (successful_episodes / episodes * 100) if episodes > 0 else 0.0
                     pbar.set_description(f"Evaluating trajectories (Success: {rate:.2f}%)")
 
-    _print_results(episodes, successful_episodes, episode_metrics)
+    stats = _print_results(episodes, successful_episodes, episode_metrics)
+    stats["checkpoint"] = args_cli.checkpoint
+    stats["task"] = args_cli.task
+    stats["temporal_ensemble"] = args_cli.temporal_ensemble
+    stats["execute_horizon"] = execute_horizon
+    stats["num_envs"] = args_cli.num_envs
+    stats["seed"] = args_cli.seed
+    stats_path = os.path.join(output_dir, "stats.json")
+    with open(stats_path, "w") as f:
+        json.dump(stats, f, indent=2)
+    print(f"\nStats saved to: {os.path.abspath(stats_path)}")
     print(f"Successful episodes: {successful_episodes}", flush=True)
+    if args_cli.save_video:
+        print(f"Videos saved to: {os.path.abspath(output_dir)}")
     if pbar is not None:
         pbar.close()
     env.close()
